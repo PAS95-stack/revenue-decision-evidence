@@ -1,0 +1,8 @@
+date,campaign_id,channel,spend_aed
+2026-07-01,CMP-SEARCH-01,Paid Search,5000.00
+2026-07-01,CMP-SOCIAL-01,Paid Social,4500.00
+2026-07-01,CMP-EMAIL-01,Email,1000.00
+2026-07-15,CMP-SEARCH-01,Paid Search,2500.00
+2026-07-15,CMP-SOCIAL-01,Paid Social,2000.00
+2026-07-15,CMP-SOCIAL-01,Paid Social,2000.00
+2026-07-20,CMP-BROKEN-01,Paid Social,not-a-number
