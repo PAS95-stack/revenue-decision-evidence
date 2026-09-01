@@ -1,0 +1,12 @@
+{
+  "run_id": "91859f94c0a9e170",
+  "status": "PASS",
+  "checks": {
+    "source_fingerprints_present": true,
+    "authoritative_claims_present": true,
+    "rejected_records_visible": true,
+    "sensitivity_present": true,
+    "human_approval_required": true,
+    "ai_not_authoritative": true
+  }
+}

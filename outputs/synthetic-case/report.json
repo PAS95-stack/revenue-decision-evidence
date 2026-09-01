@@ -1,0 +1,242 @@
+{
+  "run_id": "91859f94c0a9e170",
+  "generated_at": "2026-09-02T00:30:57+04:00",
+  "source_fingerprints": {
+    "ads": "3cab521ad2bd75e47336665ee4493d80bf49e544bee663007d4b82dd6e20e4d5",
+    "crm": "9fd8cc4e416aff5c44f9bd86879f0b3dd8ce489873d7193f28ab8c81d710a742",
+    "revenue": "a277bcfd8d641913bd1854328358a02e7baf7b5ab631d0ae61e90a19f3c8f76e"
+  },
+  "summary": {
+    "accepted_spend_aed": "15000.00",
+    "accepted_revenue_aed": "56500.00",
+    "attributed_revenue_aed": "41000.00",
+    "unattributed_or_invalid_revenue_aed": "15500.00",
+    "attribution_coverage_percent": "72.6",
+    "accepted_rows": {
+      "ads": 5,
+      "crm": 6,
+      "revenue": 7
+    },
+    "rejected_or_uncertain_rows": 9
+  },
+  "channels": [
+    {
+      "channel": "Email",
+      "spend_aed": "1000.00",
+      "attributed_revenue_aed": "3500.00",
+      "assumption_dependent_roas": "3.50",
+      "evidence_grade": "assumption-dependent"
+    },
+    {
+      "channel": "Paid Search",
+      "spend_aed": "7500.00",
+      "attributed_revenue_aed": "25000.00",
+      "assumption_dependent_roas": "3.33",
+      "evidence_grade": "assumption-dependent"
+    },
+    {
+      "channel": "Paid Social",
+      "spend_aed": "6500.00",
+      "attributed_revenue_aed": "12500.00",
+      "assumption_dependent_roas": "1.92",
+      "evidence_grade": "assumption-dependent"
+    }
+  ],
+  "sensitivity": [
+    {
+      "attribution_window_days": 30,
+      "attributed_revenue_aed": "28500.00",
+      "excluded_delayed_revenue_aed": "12500.00"
+    },
+    {
+      "attribution_window_days": 60,
+      "attributed_revenue_aed": "41000.00",
+      "excluded_delayed_revenue_aed": "0.00"
+    },
+    {
+      "attribution_window_days": 90,
+      "attributed_revenue_aed": "41000.00",
+      "excluded_delayed_revenue_aed": "0.00"
+    }
+  ],
+  "claims": [
+    {
+      "evidence_id": "EV-SPEND-001",
+      "metric": "accepted_ad_spend",
+      "value": "15000.00",
+      "unit": "AED",
+      "grade": "reconciled",
+      "explanation": "Sum of accepted advertising rows after validation and duplicate removal.",
+      "source_refs": [
+        "ads:2",
+        "ads:3",
+        "ads:4",
+        "ads:5",
+        "ads:6"
+      ],
+      "assumptions": []
+    },
+    {
+      "evidence_id": "EV-REV-001",
+      "metric": "accepted_revenue",
+      "value": "56500.00",
+      "unit": "AED",
+      "grade": "reconciled",
+      "explanation": "Sum of accepted revenue rows after validation and duplicate removal.",
+      "source_refs": [
+        "revenue:2",
+        "revenue:3",
+        "revenue:4",
+        "revenue:5",
+        "revenue:6",
+        "revenue:7",
+        "revenue:10"
+      ],
+      "assumptions": []
+    },
+    {
+      "evidence_id": "EV-ATTR-001",
+      "metric": "attributed_revenue",
+      "value": "41000.00",
+      "unit": "AED",
+      "grade": "assumption-dependent",
+      "explanation": "Revenue connected deterministically through revenue.lead_id to CRM campaign_id and advertising channel.",
+      "source_refs": [
+        "revenue:2",
+        "crm:2",
+        "revenue:3",
+        "crm:3",
+        "revenue:4",
+        "crm:4",
+        "revenue:5",
+        "crm:6"
+      ],
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ]
+    },
+    {
+      "evidence_id": "EV-COVER-001",
+      "metric": "revenue_attribution_coverage",
+      "value": "72.6",
+      "unit": "percent",
+      "grade": "reconciled",
+      "explanation": "Share of accepted revenue connected to an accepted CRM lead and advertising campaign.",
+      "source_refs": [
+        "crm:2",
+        "crm:3",
+        "crm:4",
+        "crm:5",
+        "crm:6",
+        "crm:7",
+        "revenue:2",
+        "revenue:3",
+        "revenue:4",
+        "revenue:5",
+        "revenue:6",
+        "revenue:7",
+        "revenue:10"
+      ],
+      "assumptions": []
+    },
+    {
+      "evidence_id": "EV-UNMATCH-001",
+      "metric": "unattributed_or_invalid_revenue",
+      "value": "15500.00",
+      "unit": "AED",
+      "grade": "reconciled",
+      "explanation": "Accepted revenue that could not be assigned to an advertising channel or had invalid chronology.",
+      "source_refs": [
+        "revenue:7"
+      ],
+      "assumptions": []
+    }
+  ],
+  "rejected_records": [
+    {
+      "source": "ads",
+      "source_row": 7,
+      "record_id": "CMP-SOCIAL-01",
+      "severity": "rejected",
+      "reason": "exact duplicate advertising row"
+    },
+    {
+      "source": "ads",
+      "source_row": 8,
+      "record_id": "CMP-BROKEN-01",
+      "severity": "rejected",
+      "reason": "spend_aed is not a number"
+    },
+    {
+      "source": "crm",
+      "source_row": 8,
+      "record_id": "LEAD-002",
+      "severity": "rejected",
+      "reason": "lead_id has conflicting campaign attribution"
+    },
+    {
+      "source": "crm",
+      "source_row": 9,
+      "record_id": "row-9",
+      "severity": "rejected",
+      "reason": "lead_id and campaign_id are required"
+    },
+    {
+      "source": "revenue",
+      "source_row": 8,
+      "record_id": "TX-003",
+      "severity": "rejected",
+      "reason": "duplicate transaction_id"
+    },
+    {
+      "source": "revenue",
+      "source_row": 9,
+      "record_id": "TX-007",
+      "severity": "rejected",
+      "reason": "value_aed must be a non-negative finite number"
+    },
+    {
+      "source": "revenue",
+      "source_row": 6,
+      "record_id": "TX-005",
+      "severity": "uncertain",
+      "reason": "CRM campaign_id has no accepted advertising record"
+    },
+    {
+      "source": "revenue",
+      "source_row": 7,
+      "record_id": "TX-006",
+      "severity": "uncertain",
+      "reason": "lead_id has no accepted CRM record; revenue cannot be attributed"
+    },
+    {
+      "source": "revenue",
+      "source_row": 10,
+      "record_id": "TX-008",
+      "severity": "rejected",
+      "reason": "revenue date precedes lead creation date"
+    }
+  ],
+  "recommendation": {
+    "action": "request-more-evidence",
+    "decision": "Do not reallocate budget from this evidence set.",
+    "reason": "Revenue attribution coverage is below 80%.",
+    "evidence_grade": "unsupported",
+    "human_approval_required": true
+  },
+  "human_approval": {
+    "required": true,
+    "approver_role": "accountable budget owner",
+    "status": "not approved",
+    "allowed_values": [
+      "approve",
+      "reject",
+      "request-more-evidence"
+    ]
+  },
+  "narrative": {
+    "status": "disabled",
+    "reason": "authoritative deterministic report generated; optional AI narrative not requested",
+    "content": ""
+  }
+}

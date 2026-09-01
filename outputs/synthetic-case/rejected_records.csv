@@ -1,0 +1,10 @@
+source,source_row,record_id,severity,reason
+ads,7,CMP-SOCIAL-01,rejected,exact duplicate advertising row
+ads,8,CMP-BROKEN-01,rejected,spend_aed is not a number
+crm,8,LEAD-002,rejected,lead_id has conflicting campaign attribution
+crm,9,row-9,rejected,lead_id and campaign_id are required
+revenue,8,TX-003,rejected,duplicate transaction_id
+revenue,9,TX-007,rejected,value_aed must be a non-negative finite number
+revenue,6,TX-005,uncertain,CRM campaign_id has no accepted advertising record
+revenue,7,TX-006,uncertain,lead_id has no accepted CRM record; revenue cannot be attributed
+revenue,10,TX-008,rejected,revenue date precedes lead creation date

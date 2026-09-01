@@ -4,3 +4,5 @@ __pycache__/
 .env
 outputs/*
 !outputs/.gitkeep
+!outputs/synthetic-case/
+!outputs/synthetic-case/**
