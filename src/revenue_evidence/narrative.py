@@ -32,6 +32,21 @@ PROHIBITED_LANGUAGE = re.compile(
     r"return on investment|will|forecast\w*|predict\w*|reallocat\w*|automatic\w*|autonom\w*)\b",
     re.IGNORECASE,
 )
+# Quantities written in words, or relative to another figure, bypass numeric
+# matching entirely, so they are refused. "one" is allowed as ordinary English.
+QUANTITY_WORDS = re.compile(
+    r"\b(zero|nil|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
+    r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|"
+    r"ninety|hundreds?|thousands?|lakhs?|crores?|half|double|twice|triple|treble|quadruple)\b",
+    re.IGNORECASE,
+)
+# Every channel figure is assumption-dependent; ranking or judging channels on it
+# is the unreliable optimisation the report explicitly declines to support.
+RANKING_LANGUAGE = re.compile(
+    r"\b(best|worst|better|worse|outperform\w*|underperform\w*|strongest|weakest|highest|lowest|"
+    r"top|bottom|winn\w*|los(?:er|ers|ing)|superior|inferior|clearly|obviously|definitely|certainly)\b",
+    re.IGNORECASE,
+)
 DATE_PATTERN = re.compile(r"\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}/\d{1,2}/\d{2,4}\b")
 ABBREVIATED_AMOUNT = re.compile(
     r"\d[\d,]*(?:\.\d+)?\s*(?:k|m|mn|bn|b|thousand|million|billion)\b", re.IGNORECASE
@@ -128,6 +143,17 @@ def validate_narrative(text: str, report: EvidenceReport) -> tuple[bool, str]:
                 "narrative contains prohibited causal, forecast, guarantee, ROI or autonomy wording: "
                 f"{prohibited.group(0)!r}"
             )
+        quantity = QUANTITY_WORDS.search(remainder)
+        if quantity:
+            return False, (
+                f"spelled-out or relative quantities cannot be verified: {quantity.group(0)!r}"
+            )
+        ranking = RANKING_LANGUAGE.search(remainder)
+        if ranking:
+            return False, (
+                "narrative must not rank or judge channels on assumption-dependent evidence: "
+                f"{ranking.group(0)!r}"
+            )
         if DATE_PATTERN.search(remainder):
             return False, f"narrative must not state dates: {sentence!r}"
         if ABBREVIATED_AMOUNT.search(remainder):
@@ -160,7 +186,8 @@ def generate_azure_narrative(report: EvidenceReport) -> dict[str, str]:
         "Explain only the supplied computed evidence records. Every sentence that contains a number "
         "must cite, in square brackets inside that same sentence, the evidence ID whose value it states, "
         "and must copy that value exactly (thousands separators allowed; no rounding, abbreviations, "
-        "signs or dates). Do not describe causation, incrementality, forecasts, guarantees, ROI, budget "
+        "signs, dates or numbers written in words). Do not rank, compare or judge channels. Do not "
+        "describe causation, incrementality, forecasts, guarantees, ROI, budget "
         "changes, approval or execution. Do not repeat the decision-rights statement; the application "
         "adds it."
     )

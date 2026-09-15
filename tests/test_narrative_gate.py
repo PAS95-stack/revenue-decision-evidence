@@ -143,6 +143,25 @@ class NarrativeGateTests(unittest.TestCase):
         self.rejects("Revenue looks healthy.", "no evidence citations")
         self.rejects("   ", "empty")
 
+    def test_g16_spelled_out_or_relative_quantities_are_rejected(self):
+        # Found by probing the first phase 2 gate: these passed numeric matching entirely.
+        for text in (
+            "Accepted revenue is sixty-five thousand five hundred dirhams [EV-REV-001].",
+            "Unattributed revenue is zero [EV-UNMATCH-001].",
+            "Paid Search attributed revenue is twice that of Paid Social [EV-CHATTR-002].",
+        ):
+            with self.subTest(text=text):
+                self.rejects(text, "quantities")
+
+    def test_g17_ranking_or_judging_channels_is_rejected(self):
+        for text in (
+            "Paid Search is clearly the best channel at 2.13× [EV-CHROAS-002].",
+            "Paid Search outperforms Paid Social [EV-CHROAS-002].",
+            "Paid Social has the lowest ROAS at 1.92× [EV-CHROAS-003].",
+        ):
+            with self.subTest(text=text):
+                self.rejects(text, "rank")
+
 
 class LabelTests(unittest.TestCase):
     def setUp(self) -> None:
