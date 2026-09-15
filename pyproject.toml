@@ -1,6 +1,6 @@
 [project]
 name = "revenue-decision-evidence"
-version = "0.3.0"
+version = "0.3.1"
 description = "Deterministic, source-row-traceable revenue decision evidence workflow"
 requires-python = ">=3.11"
 

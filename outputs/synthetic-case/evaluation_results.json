@@ -11,16 +11,16 @@
     "executive_brief",
     "sufficient_evidence"
   ],
-  "engine_version": "0.3.0",
+  "engine_version": "0.3.1",
   "failures": [],
   "published_outputs": {
-    "executive_brief.md": "68e2a1f427f50ba0d9a6c695a4a4e5ae5aee07c6e7a6ce7d7dfecb6a740e2510",
+    "executive_brief.md": "7570e60db9f2fd409146c701ac437a091e569fe35beb1c8efa8c50129b4e4cf6",
     "lineage.csv": "ff44b2667cec2a5523ad72a1208f0527e392e6a810881386383cc776ab7e6996",
     "rejected_records.csv": "be420669457c161058150fcc57b4e0978a6b3f9fd5d2b137336b7f42a513c57a",
-    "report.html": "98767aae252aa90cc52ad2d0bd84e57e74a310b10d1161619dd0489a15b2d018",
-    "report.json": "68fbbb27ac061d82477c0ad99e10530febf317f7c4a4eeb7058ae809f67bb0dd",
+    "report.html": "8f146e7e70abd153b5620b7a4d2ca6c61395f2e2aa3b99e78c34a4ad61bbdb39",
+    "report.json": "2876911d50a4dfd641791f3d6e51a8cc0054da1dbd4ffe37c950fde9e6670b6e",
     "row_dispositions.csv": "f1092dcc43f461e9299077e4c0a3c8d17cb81c46bca622357b7ff98a12aaab06"
   },
-  "run_id": "55f04d0ab78fc21f",
+  "run_id": "5b7c11ad50709cf6",
   "status": "PASS"
 }

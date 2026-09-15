@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revenue_evidence.engine import REJECTED, EvidenceEngine  # noqa: E402
 from revenue_evidence.narrative import (  # noqa: E402
     BOUNDARY_STATEMENT,
+    METRIC_VOCABULARY,
     generate_azure_narrative,
     validate_narrative,
 )
@@ -31,9 +32,27 @@ UNIT_SUFFIX = {"AED": "", "percent": "%", "ratio": "×"}
 STEP = {"AED": Decimal("0.01"), "percent": Decimal("0.1"), "ratio": Decimal("0.01")}
 
 
-def sentence_for(evidence_id: str, unit: str, value: str) -> str:
-    prefix = "AED " if unit == "AED" else ""
-    return f"The recorded figure is {prefix}{value}{UNIT_SUFFIX[unit]} [{evidence_id}]."
+# How an accurate narrative describes each metric. The gate requires a figure to be
+# described as its own metric, and a channel or window figure to name its channel or window.
+DESCRIPTIONS = {
+    "accepted_ad_spend": "Accepted spend",
+    "channel_accepted_ad_spend": "{channel} spend",
+    "accepted_revenue": "Accepted revenue",
+    "attributed_revenue": "Attributed revenue",
+    "channel_attributed_revenue": "{channel} attributed revenue",
+    "window_attributed_revenue": "Revenue attributed within {window_days} days",
+    "revenue_attribution_coverage": "Attribution coverage",
+    "unattributed_or_invalid_revenue": "Unattributed revenue",
+    "revenue_with_conflicting_lead_attribution": "Revenue with conflicting lead attribution",
+    "channel_assumption_dependent_roas": "{channel} assumption-dependent ROAS",
+    "window_excluded_delayed_revenue": "Attributed revenue arriving after {window_days} days",
+}
+
+
+def sentence_for(claim, value: str) -> str:
+    prefix = "AED " if claim.unit == "AED" else ""
+    subject = DESCRIPTIONS[claim.metric].format(**claim.dimensions)
+    return f"{subject} is {prefix}{value}{UNIT_SUFFIX[claim.unit]} [{claim.evidence_id}]."
 
 
 class NarrativeGateTests(unittest.TestCase):
@@ -54,9 +73,9 @@ class NarrativeGateTests(unittest.TestCase):
     def test_g01_every_claim_value_passes_and_the_next_value_fails(self):
         for claim in self.report.claims:
             with self.subTest(evidence_id=claim.evidence_id):
-                self.accepts(sentence_for(claim.evidence_id, claim.unit, claim.value))
+                self.accepts(sentence_for(claim, claim.value))
                 nudged = str(Decimal(claim.value) + STEP[claim.unit])
-                self.rejects(sentence_for(claim.evidence_id, claim.unit, nudged), "does not match")
+                self.rejects(sentence_for(claim, nudged), "does not match")
 
     def test_g02_equivalent_spellings_of_the_same_value_pass(self):
         for text in (
@@ -161,6 +180,65 @@ class NarrativeGateTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.rejects(text, "rank")
+
+
+    def test_g18_a_correct_number_described_as_another_metric_is_rejected(self):
+        # Found while writing the walkthrough: the spend figure described as revenue passed.
+        for text in (
+            "Accepted revenue is AED 15,000 [EV-SPEND-001].",
+            "Accepted revenue is AED 32,000 [EV-ATTR-001].",
+            "Attributed revenue is AED 56,500 [EV-REV-001].",
+            "Attributed revenue is AED 24,500 [EV-UNMATCH-001].",
+            "Attributed revenue is AED 9,000 [EV-CONFLICT-001].",
+            "Revenue share is 56.6% [EV-COVER-001].",
+            "Paid Search spend is 2.13× [EV-CHROAS-002].",
+            "Takings are AED 15,000 [EV-SPEND-001].",
+        ):
+            with self.subTest(text=text):
+                self.rejects(text, "described as")
+
+    def test_g19_channel_figures_must_name_their_own_channel(self):
+        self.accepts("Paid Search spend is AED 7,500 [EV-CHSPEND-002].")
+        self.rejects("Paid Social spend is AED 7,500 [EV-CHSPEND-002].", "described as Paid Social")
+        self.rejects("Spend is AED 7,500 [EV-CHSPEND-002].", "does not name Paid Search")
+
+    def test_g20_window_figures_must_state_their_window(self):
+        self.rejects("Attributed revenue is AED 28,500 [EV-WINATTR-030].", "window")
+        self.rejects("Within 60 days, AED 28,500 was attributed [EV-WINATTR-030].", "does not match")
+
+    def test_g21_a_figure_cannot_borrow_a_neighbouring_citation(self):
+        self.rejects(
+            "Paid Search spend is AED 16,000 [EV-CHATTR-002] and attributed revenue is AED 7,500 [EV-CHSPEND-002].",
+            "described as spend",
+        )
+        self.rejects("Accepted revenue is AED 15,000 [EV-REV-001] [EV-SPEND-001].", "described as")
+        self.rejects(
+            "Accepted revenue is AED 15,000 and spend is AED 56,500 [EV-REV-001] [EV-SPEND-001].",
+            "cite each figure",
+        )
+        self.rejects(
+            "Accepted revenue is AED 56,500 [EV-REV-001], and Paid Search spend is AED 15,000 [EV-SPEND-001].",
+            "described as Paid Search",
+        )
+
+    def test_g22_accurate_descriptions_in_natural_sentences_pass(self):
+        for text in (
+            "Accepted revenue is AED 56,500 [EV-REV-001] and AED 32,000 of it is attributed [EV-ATTR-001].",
+            "AED 24,500 of accepted revenue could not be assigned to a channel [EV-UNMATCH-001].",
+            "Paid Search has spend of AED 7,500 [EV-CHSPEND-002], attributed revenue of AED 16,000 "
+            "[EV-CHATTR-002] and assumption-dependent return on ad spend of 2.13× [EV-CHROAS-002].",
+            "Accepted revenue [EV-REV-001] is AED 56,500.",
+            "Attributed revenue is AED 32,000 [EV-ATTR-001] [EV-WINATTR-060].",
+            "Within 30 days, AED 28,500 was attributed [EV-WINATTR-030] and AED 3,500 arrived later [EV-WINEXCL-030].",
+        ):
+            with self.subTest(text=text):
+                self.accepts(text)
+
+    def test_g23_every_engine_metric_has_a_description_vocabulary(self):
+        self.assertEqual({claim.metric for claim in self.report.claims}, set(METRIC_VOCABULARY))
+        self.assertEqual(set(DESCRIPTIONS), set(METRIC_VOCABULARY))
+        for allowed, required in METRIC_VOCABULARY.values():
+            self.assertTrue(required <= allowed)
 
 
 class LabelTests(unittest.TestCase):

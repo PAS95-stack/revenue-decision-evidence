@@ -1,9 +1,9 @@
 # Executive Evidence Brief — Synthetic Demonstration
 
 **Evidence status:** synthetic and reproducible; not a customer result, real-data deployment, reference, or paid validation.
-**Run ID:** `55f04d0ab78fc21f`
+**Run ID:** `5b7c11ad50709cf6`
 **Decision status:** not approved; named budget-owner approval is required.
-**Engine:** 0.3.0 · **Rule set:** pas95-revenue-evidence-rules version 1
+**Engine:** 0.3.1 · **Rule set:** pas95-revenue-evidence-rules version 1
 
 ## Decision question
 

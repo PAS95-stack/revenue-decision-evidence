@@ -9,8 +9,8 @@
   from the raw exports; outputs are published only when the two agree.
 - A narrative gate that rejects any number not equal to the evidence it cites.
 
-Verified with 98 tests on Python 3.13. CI covers Python 3.11–3.13 and has not yet
-run on these changes.
+Verified with 103 tests on Python 3.13. CI runs the same suite on Python
+3.11–3.13 for every push.
 
 ## What it does not demonstrate
 
@@ -42,9 +42,13 @@ run on these changes.
 **Narrative gate**
 - It relies on word lists. Judgement words not on the list pass, for example
   "Paid Search looks promising at 2.13×". The word "one" is allowed.
-- It binds each number to the evidence cited beside it, not to the words around
-  it. "Accepted revenue is AED 15,000 [EV-SPEND-001]" passes, because 15,000 is
-  the cited spend figure, even though the sentence calls it revenue.
+- Descriptions are checked against a fixed vocabulary for each metric. A figure
+  described only in other words ("takings") is rejected, but an unlisted word
+  beside a correct one passes: "Spend, or takings, is AED 15,000
+  [EV-SPEND-001]".
+- Each figure must be cited directly after the words that describe it. Some
+  accurate phrasings are therefore refused, such as two figures followed by two
+  citations, or the word "after" beside a figure that is not a window figure.
 - Numbers must match exactly, so a correct but rounded figure is rejected.
 - Tested with fixed text and a mocked model response. No real model output has
   been evaluated.

@@ -22,7 +22,7 @@ reproduce from the raw rows. The data here is synthetic."
 
 **0:30–0:50 — Step 1: tests**
 
-Show `Ran 98 tests … OK`. Say: "These include attacks written before the fixes,
+Show `Ran 103 tests … OK`. Say: "These include attacks written before the fixes,
 200 generated datasets with injected faults, and deliberately broken copies of
 the engine that must be blocked."
 
@@ -52,9 +52,9 @@ cannot import the engine. The engine publishes only if the checker agrees."
 **2:50–3:40 — Step 5: make the narrative lie**
 
 Say: "The optional AI summary goes through a gate. The true sentence passes.
-65,500 is rejected, and the reason names the real value. So are the spend figure
-presented as revenue, an evidence ID that does not exist, a number with no
-citation, and a causal claim."
+65,500 is rejected, and the reason names the real value. So are 15,000 cited as
+revenue evidence, the real spend figure described as revenue, an evidence ID that
+does not exist, a number with no citation, and a causal claim."
 
 **3:40–4:05 — Step 6: tamper after publishing**
 

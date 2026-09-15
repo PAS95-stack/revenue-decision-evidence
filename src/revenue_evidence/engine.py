@@ -22,7 +22,7 @@ MONEY = Decimal("0.01")
 
 # Part of every run_id: a change to the computation must not reuse an old identity.
 # Kept equal to pyproject.toml's version by test.
-ENGINE_VERSION = "0.3.0"
+ENGINE_VERSION = "0.3.1"
 
 # Every threshold and window the report depends on, published in the report. The
 # whole content (not just the version label) is hashed into run_id.

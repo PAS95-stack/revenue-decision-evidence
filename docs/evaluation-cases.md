@@ -2,7 +2,7 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 98 tests, all passing on Python 3.13 on 15 September 2026, in about
+**Result:** 103 tests, all passing on Python 3.13 on 15 September 2026, in about
 two seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
@@ -49,6 +49,11 @@ each defect existed. All now pass.
 | g13–g14 | Forecast, reallocation, ROI, incrementality, proof, approval or execution wording: rejected |
 | g15 | No citation at all, or empty text: rejected |
 | g16–g17 | Numbers written in words, relative quantities and channel rankings: rejected |
+| g18 | A correct number described as another metric, or not described at all: rejected |
+| g19–g20 | A channel or window figure must name its own channel or window |
+| g21 | A figure cannot borrow a neighbouring citation; two figures followed by two citations are refused |
+| g22 | Accurate descriptions in natural sentences pass |
+| g23 | Every metric the engine produces has a description vocabulary |
 | l01–l02 | Digits inside a cited channel name are not figures; bracketed labels rejected at ingest |
 | w01–w03 | With a mocked model response: false output disabled, valid output gets the boundary appended, request carries no row references |
 
@@ -113,9 +118,8 @@ minimum.
 |---|---|
 | o01 | `outputs/synthetic-case` matches a fresh run byte for byte |
 
-## Walkthrough and known gaps (`test_demo_script.py`)
+## Walkthrough (`test_demo_script.py`)
 
 | ID | Required behaviour |
 |---|---|
-| w04 | `scripts/demo.sh` runs to completion and every step gets its expected exit code |
-| k01 | Known gap, pinned so a fix is noticed: a correct number cited to the right evidence but described as a different metric passes the gate |
+| w04 | `scripts/demo.sh` runs to completion and every step gets its expected exit code, including rejection of the false and the mislabelled revenue sentence |

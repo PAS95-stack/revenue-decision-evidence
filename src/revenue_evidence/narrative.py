@@ -59,6 +59,61 @@ NUMBER = re.compile(
 )
 PLAIN_NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
+# A correct number can still be described as the wrong thing ("revenue is AED 15,000"
+# citing spend). Words that describe a figure are grouped by what they describe.
+# Phrases containing another term ("return on ad spend", "could not be attributed")
+# come first and are removed before the shorter terms are looked for.
+METRIC_TERMS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ROAS", re.compile(r"\broas\b|\breturn on ad(?:vertising)? spend\b", re.IGNORECASE)),
+    (
+        "unattributed",
+        re.compile(
+            r"\bunattributed\b|\bunassigned\b|\bunmatched\b|"
+            r"\b(?:not|never|cannot|could not|can't|couldn't)\s+(?:be\s+)?(?:attributed|assigned|matched|linked)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("conflicting", re.compile(r"\bconflict\w*|\bcontradict\w*|\bdisagree\w*", re.IGNORECASE)),
+    ("excluded or delayed", re.compile(r"\bexclud\w*|\bdelayed\b|\boutside\b|\bafter\b|\blater\b", re.IGNORECASE)),
+    ("coverage", re.compile(r"\bcoverage\b|\bcovered\b", re.IGNORECASE)),
+    ("attributed", re.compile(r"\battribut\w*|\bassigned\b|\bmatched\b|\blinked\b", re.IGNORECASE)),
+    ("spend", re.compile(r"\bspend\w*|\bspent\b|\bcosts?\b", re.IGNORECASE)),
+    ("revenue", re.compile(r"\brevenue\b|\bsales\b|\bincome\b|\bturnover\b", re.IGNORECASE)),
+    ("accepted", re.compile(r"\baccepted\b", re.IGNORECASE)),
+)
+# For each metric: the description terms allowed beside its figure, and the terms
+# of which at least one must be present. A metric missing here cannot be narrated.
+_SPEND = (frozenset({"spend", "accepted"}), frozenset({"spend"}))
+_ATTRIBUTED = (frozenset({"attributed", "revenue"}), frozenset({"attributed"}))
+METRIC_VOCABULARY: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "accepted_ad_spend": _SPEND,
+    "channel_accepted_ad_spend": _SPEND,
+    "accepted_revenue": (frozenset({"revenue", "accepted"}), frozenset({"revenue"})),
+    "attributed_revenue": _ATTRIBUTED,
+    "channel_attributed_revenue": _ATTRIBUTED,
+    "window_attributed_revenue": _ATTRIBUTED,
+    "revenue_attribution_coverage": (
+        frozenset({"coverage", "attributed", "revenue", "accepted"}),
+        frozenset({"coverage"}),
+    ),
+    "unattributed_or_invalid_revenue": (
+        frozenset({"unattributed", "revenue", "accepted"}),
+        frozenset({"unattributed"}),
+    ),
+    "revenue_with_conflicting_lead_attribution": (
+        frozenset({"conflicting", "attributed", "unattributed", "revenue", "accepted"}),
+        frozenset({"conflicting"}),
+    ),
+    "channel_assumption_dependent_roas": (
+        frozenset({"ROAS", "attributed", "revenue", "spend", "accepted"}),
+        frozenset({"ROAS"}),
+    ),
+    "window_excluded_delayed_revenue": (
+        frozenset({"excluded or delayed", "attributed", "revenue"}),
+        frozenset({"excluded or delayed"}),
+    ),
+}
+
 
 def evidence_payload(report: EvidenceReport) -> dict[str, Any]:
     """Computed evidence values only: no source rows and no row references."""
@@ -83,26 +138,139 @@ def _unit(match: re.Match[str]) -> str | None:
     return None
 
 
+def _value(match: re.Match[str]) -> Decimal | None:
+    if match.group("sign"):
+        return None
+    return Decimal(match.group("number").replace(",", ""))
+
+
+def _qualifies(match: re.Match[str], claim: Claim) -> bool:
+    """The number is a numeric qualifier of the claim, such as its window length."""
+    value = _value(match)
+    return value is not None and _unit(match) in (None, "days") and any(
+        PLAIN_NUMBER.fullmatch(qualifier) and Decimal(qualifier) == value
+        for qualifier in claim.dimensions.values()
+    )
+
+
+def _states_value(match: re.Match[str], claim: Claim) -> bool:
+    value = _value(match)
+    unit = _unit(match)
+    if value is None or unit == "days" or (unit is not None and unit != claim.unit):
+        return False
+    try:
+        return Decimal(claim.value) == value
+    except InvalidOperation:
+        return False
+
+
 def _supported(match: re.Match[str], cited: list[Claim]) -> bool:
     """A number is supported only by the value, or a numeric qualifier, of a claim cited beside it."""
-    if match.group("sign"):
-        return False
-    value = Decimal(match.group("number").replace(",", ""))
-    unit = _unit(match)
-    for claim in cited:
-        if unit in (None, "days") and any(
-            PLAIN_NUMBER.fullmatch(qualifier) and Decimal(qualifier) == value
-            for qualifier in claim.dimensions.values()
-        ):
-            return True
-        if unit == "days" or (unit is not None and unit != claim.unit):
+    return any(_qualifies(match, claim) or _states_value(match, claim) for claim in cited)
+
+
+def _label_pattern(label: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<!\w){re.escape(label)}(?!\w)", re.IGNORECASE)
+
+
+def _described_as(text: str) -> set[str]:
+    found: set[str] = set()
+    for kind, pattern in METRIC_TERMS:
+        if pattern.search(text):
+            found.add(kind)
+            text = pattern.sub(" ", text)
+    return found
+
+
+def _clauses(sentence: str) -> list[tuple[str, list[str]]]:
+    """Split a sentence at its citations, so each figure binds to the citation after it.
+
+    Adjacent citations share the clause before them, and text after the last
+    citation belongs to the last clause.
+    """
+    clauses: list[tuple[str, list[str]]] = []
+    start = 0
+    for match in CITATION_PATTERN.finditer(sentence):
+        text = sentence[start:match.start()]
+        if clauses and not re.search(r"\w", text):
+            clauses[-1][1].append(match.group(1))
+        else:
+            clauses.append((text, [match.group(1)]))
+        start = match.end()
+    if clauses:
+        text, ids = clauses[-1]
+        clauses[-1] = (f"{text} {sentence[start:]}", ids)
+    return clauses
+
+
+def _description_problem(
+    claim: Claim,
+    figure: re.Match[str],
+    clause: str,
+    sentence: str,
+    sentence_numbers: list[re.Match[str]],
+    labels: list[str],
+) -> str | None:
+    """Why the words around a figure do not describe the claim it matches, or None."""
+    quoted = repr(figure.group(0).strip())
+    own = {value.lower() for value in claim.dimensions.values() if not PLAIN_NUMBER.fullmatch(value)}
+    words = clause
+    for label in labels:
+        pattern = _label_pattern(label)
+        if pattern.search(words):
+            if label.lower() not in own:
+                return f"{quoted} is described as {label}, but {claim.evidence_id} is not a {label} figure"
+            words = pattern.sub(" ", words)
+    for qualifier in claim.dimensions.values():
+        if PLAIN_NUMBER.fullmatch(qualifier):
+            if not any(_qualifies(match, claim) for match in sentence_numbers):
+                return (
+                    f"{quoted} cites {claim.evidence_id}, a {qualifier}-day window figure, "
+                    "but the sentence does not state that window"
+                )
+        elif not _label_pattern(qualifier).search(sentence):
+            return f"{quoted} cites {claim.evidence_id}, a {qualifier} figure, but the sentence does not name {qualifier}"
+    if claim.metric not in METRIC_VOCABULARY:
+        return f"{claim.evidence_id} ({claim.metric}) has no description vocabulary and cannot be narrated"
+    allowed, required = METRIC_VOCABULARY[claim.metric]
+    described = _described_as(words)
+    wrong = sorted(described - allowed)
+    if wrong:
+        return f"{quoted} is described as {', '.join(wrong)}, but {claim.evidence_id} is {claim.metric}"
+    if not described & required:
+        return f"{quoted} must be described as {' or '.join(sorted(required))} to cite {claim.evidence_id}"
+    return None
+
+
+def _clause_problem(
+    clause: str,
+    cited: list[Claim],
+    strip_labels: list[str],
+    sentence: str,
+    sentence_numbers: list[re.Match[str]],
+    labels: list[str],
+) -> str | None:
+    text = clause
+    for label in strip_labels:
+        text = re.sub(re.escape(label), " ", text, flags=re.IGNORECASE)
+    figures: list[tuple[re.Match[str], list[Claim]]] = []
+    for match in NUMBER.finditer(text):
+        if any(_qualifies(match, claim) for claim in cited):
             continue
-        try:
-            if Decimal(claim.value) == value:
-                return True
-        except InvalidOperation:
-            continue
-    return False
+        stated = [claim for claim in cited if _states_value(match, claim)]
+        if not stated:
+            values = ", ".join(f"{claim.evidence_id}={claim.value} {claim.unit}" for claim in cited)
+            return f"{match.group(0).strip()!r} does not match any value cited beside it ({values})"
+        figures.append((match, stated))
+    if len(figures) > 1 and len(cited) > 1:
+        return f"cite each figure directly after the words that describe it: {clause.strip()!r}"
+    for figure, stated in figures:
+        problems = [
+            _description_problem(claim, figure, clause, sentence, sentence_numbers, labels) for claim in stated
+        ]
+        if all(problems):
+            return problems[0]
+    return None
 
 
 def validate_narrative(text: str, report: EvidenceReport) -> tuple[bool, str]:
@@ -111,6 +279,16 @@ def validate_narrative(text: str, report: EvidenceReport) -> tuple[bool, str]:
     if not CITATION_PATTERN.search(text):
         return False, "narrative contains no evidence citations"
     claims = {claim.evidence_id: claim for claim in report.claims}
+    every_label = sorted(
+        {
+            qualifier
+            for claim in report.claims
+            for qualifier in claim.dimensions.values()
+            if not PLAIN_NUMBER.fullmatch(qualifier)
+        },
+        key=len,
+        reverse=True,
+    )
 
     for sentence in (part.strip() for part in SENTENCE_SPLIT.split(text)):
         if not sentence:
@@ -124,13 +302,17 @@ def validate_narrative(text: str, report: EvidenceReport) -> tuple[bool, str]:
         remainder = CITATION_PATTERN.sub(" ", sentence)
         if re.search(r"EV-", remainder, re.IGNORECASE):
             return False, f"malformed evidence citation in: {sentence!r}"
-        labels = {
-            qualifier
-            for claim in cited
-            for qualifier in claim.dimensions.values()
-            if not PLAIN_NUMBER.fullmatch(qualifier)
-        }
-        for label in sorted(labels, key=len, reverse=True):
+        labels = sorted(
+            {
+                qualifier
+                for claim in cited
+                for qualifier in claim.dimensions.values()
+                if not PLAIN_NUMBER.fullmatch(qualifier)
+            },
+            key=len,
+            reverse=True,
+        )
+        for label in labels:
             remainder = re.sub(re.escape(label), " ", remainder, flags=re.IGNORECASE)
 
         if BOUNDARY_LANGUAGE.search(remainder):
@@ -162,12 +344,13 @@ def validate_narrative(text: str, report: EvidenceReport) -> tuple[bool, str]:
         numbers = list(NUMBER.finditer(remainder))
         if numbers and not cited:
             return False, f"sentence states a number without citing evidence: {sentence!r}"
-        for match in numbers:
-            if not _supported(match, cited):
-                values = ", ".join(f"{claim.evidence_id}={claim.value} {claim.unit}" for claim in cited)
-                return False, (
-                    f"{match.group(0).strip()!r} does not match any value cited in the same sentence ({values})"
-                )
+        for clause, clause_ids in _clauses(sentence):
+            problem = _clause_problem(
+                clause, [claims[evidence_id] for evidence_id in dict.fromkeys(clause_ids)],
+                labels, sentence, numbers, every_label,
+            )
+            if problem:
+                return False, problem
     return True, "validated"
 
 
@@ -186,7 +369,11 @@ def generate_azure_narrative(report: EvidenceReport) -> dict[str, str]:
         "Explain only the supplied computed evidence records. Every sentence that contains a number "
         "must cite, in square brackets inside that same sentence, the evidence ID whose value it states, "
         "and must copy that value exactly (thousands separators allowed; no rounding, abbreviations, "
-        "signs, dates or numbers written in words). Do not rank, compare or judge channels. Do not "
+        "signs, dates or numbers written in words). Place each citation directly after the words and "
+        "figure it supports. Describe each figure with its own metric (for example accepted spend, "
+        "accepted revenue, attributed revenue, attribution coverage, unattributed revenue, conflicting "
+        "revenue, ROAS, or revenue excluded after a window), and name the channel or window of a "
+        "channel or window figure. Do not rank, compare or judge channels. Do not "
         "describe causation, incrementality, forecasts, guarantees, ROI, budget "
         "changes, approval or execution. Do not repeat the decision-rights statement; the application "
         "adds it."

@@ -28,8 +28,9 @@ or evidence of paid validation.
   export has no usable rows, only `evaluation_results.json` is written and the
   command exits with code 2.
 - **Optional AI narrative, off by default.** The model receives computed figures
-  only. Every number it writes must equal the value of the evidence it cites in
-  the same sentence, or the narrative is discarded. The application, not the
+  only. Every number it writes must equal the value of the evidence cited
+  directly after it, be described as that evidence's metric, and name its
+  channel or window, or the narrative is discarded. The application, not the
   model, states the decision-rights boundary.
 
 ## Quick start
