@@ -1,12 +1,26 @@
 {
-  "run_id": "91859f94c0a9e170",
-  "status": "PASS",
-  "checks": {
-    "source_fingerprints_present": true,
-    "authoritative_claims_present": true,
-    "rejected_records_visible": true,
-    "sensitivity_present": true,
-    "human_approval_required": true,
-    "ai_not_authoritative": true
-  }
+  "checks": [
+    "sources_match_fingerprints",
+    "ruleset_fingerprint_and_run_id",
+    "row_dispositions",
+    "rejected_records",
+    "claim_values",
+    "claim_lineage",
+    "summary",
+    "channels_and_sensitivity",
+    "executive_brief",
+    "sufficient_evidence"
+  ],
+  "engine_version": "0.3.0",
+  "failures": [],
+  "published_outputs": {
+    "executive_brief.md": "68e2a1f427f50ba0d9a6c695a4a4e5ae5aee07c6e7a6ce7d7dfecb6a740e2510",
+    "lineage.csv": "ff44b2667cec2a5523ad72a1208f0527e392e6a810881386383cc776ab7e6996",
+    "rejected_records.csv": "be420669457c161058150fcc57b4e0978a6b3f9fd5d2b137336b7f42a513c57a",
+    "report.html": "98767aae252aa90cc52ad2d0bd84e57e74a310b10d1161619dd0489a15b2d018",
+    "report.json": "68fbbb27ac061d82477c0ad99e10530febf317f7c4a4eeb7058ae809f67bb0dd",
+    "row_dispositions.csv": "f1092dcc43f461e9299077e4c0a3c8d17cb81c46bca622357b7ff98a12aaab06"
+  },
+  "run_id": "55f04d0ab78fc21f",
+  "status": "PASS"
 }

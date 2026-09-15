@@ -1,0 +1,5 @@
+# Bytes matter in these paths: input fingerprints feed run_id, and committed
+# outputs are compared byte for byte with a fresh run (the csv module writes
+# CRLF line endings). Never convert line endings on checkout.
+data/synthetic/*.csv -text
+outputs/synthetic-case/* -text

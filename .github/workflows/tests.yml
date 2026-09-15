@@ -10,10 +10,29 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - name: Run evaluation suite
+          python-version: ${{ matrix.python-version }}
+      - name: Run test suite
         run: python -m unittest discover -s tests -v
+      - name: Regenerate synthetic outputs and compare with the committed files
+        run: |
+          PYTHONPATH=src python -m revenue_evidence.cli \
+            --ads data/synthetic/ads.csv \
+            --crm data/synthetic/crm.csv \
+            --revenue data/synthetic/revenue.csv \
+            --output "$RUNNER_TEMP/fresh"
+          diff -r outputs/synthetic-case "$RUNNER_TEMP/fresh"
+      - name: Verify committed outputs with the independent checker
+        run: |
+          python -I src/revenue_evidence/reconstruct.py \
+            --ads data/synthetic/ads.csv \
+            --crm data/synthetic/crm.csv \
+            --revenue data/synthetic/revenue.csv \
+            --output outputs/synthetic-case

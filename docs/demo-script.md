@@ -19,4 +19,4 @@ Show the 30/60/90-day sensitivity. Explain that a deterministic join can still b
 Show `narrative.py`: only computed evidence crosses the boundary. Unsupported citations, guarantee language, autonomy, or omission of human approval disables the narrative.
 
 **4:45–5:00 — Close**  
-“The output is one bounded recommendation, not an automated action. The named budget owner approves, rejects, or requests more evidence. The synthetic case proves reproducibility; only a permissioned external delivery can establish real-world usefulness.”
+“The output is data-quality findings and the questions to answer, never a budget move or an automated action. The named budget owner approves, rejects, or requests more evidence. The synthetic case proves reproducibility; only a permissioned external delivery can establish real-world usefulness.”
