@@ -12,7 +12,12 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from revenue_evidence.engine import EvidenceEngine, InputContractError, write_outputs
-from revenue_evidence.narrative import evidence_payload, validate_narrative
+from revenue_evidence.narrative import (
+    BOUNDARY_STATEMENT,
+    evidence_payload,
+    finalize_narrative,
+    validate_narrative,
+)
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -152,12 +157,16 @@ class EvidenceEngineTests(unittest.TestCase):
 
     def test_11_supported_ai_narrative_passes(self):
         report = self.run_report()
-        valid, reason = validate_narrative(
-            "Accepted spend is recorded [EV-SPEND-001]. Human approval is required.",
-            report,
-        )
+        # The model no longer states the approval boundary; the application appends it.
+        text = "Accepted spend is AED 150.00 [EV-SPEND-001]."
+        valid, reason = validate_narrative(text, report)
         self.assertTrue(valid, reason)
-        self.assertNotIn("source_rows", evidence_payload(report))
+        self.assertTrue(finalize_narrative(text).endswith(BOUNDARY_STATEMENT))
+        payload = evidence_payload(report)
+        self.assertNotIn("source_rows", payload)
+        for claim in payload["claims"]:
+            self.assertNotIn("source_refs", claim)
+            self.assertNotIn("lineage", claim)
 
     def test_12_revenue_before_lead_is_not_attributed(self):
         write_csv(

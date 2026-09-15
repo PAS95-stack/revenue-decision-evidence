@@ -72,6 +72,9 @@ class Claim:
     source_refs: list[str]
     assumptions: list[str]
     lineage: list[dict[str, str]]
+    # Qualifiers that belong to the figure, such as its channel or window length.
+    # A narrative may repeat these next to the claim it cites.
+    dimensions: dict[str, str]
 
 
 @dataclass
@@ -146,6 +149,7 @@ def _claim(
     explanation: str,
     roles: dict[str, list[str]],
     assumptions: Iterable[str] = (),
+    dimensions: dict[str, str] | None = None,
 ) -> Claim:
     unknown = set(roles) - set(LINEAGE_ROLES)
     if unknown:
@@ -157,7 +161,8 @@ def _claim(
     ]
     source_refs = list(dict.fromkeys(entry["source_ref"] for entry in lineage))
     return Claim(
-        evidence_id, metric, value, unit, grade, explanation, source_refs, list(assumptions), lineage
+        evidence_id, metric, value, unit, grade, explanation, source_refs, list(assumptions), lineage,
+        dict(dimensions or {}),
     )
 
 
@@ -287,36 +292,96 @@ class EvidenceEngine:
         conflicted_total = sum((row["value"] for row in conflicted_revenue), Decimal("0"))
         coverage = Decimal("0") if revenue_total == 0 else attributed_total / revenue_total
 
+        attribution_assumption = ["CRM campaign is treated as the governing source attribution."]
         channel_rows: list[dict[str, Any]] = []
-        for channel in sorted(spend_by_channel):
-            channel_revenue = sum(
-                (row["value"] for row in attributed if row["channel"] == channel),
-                Decimal("0"),
-            )
+        channel_claims: list[Claim] = []
+        channels = sorted(spend_by_channel)
+        if len(channels) > 999:
+            raise InputContractError("more than 999 channels cannot be given evidence IDs")
+        # IDs are numbered by sorted channel name, so they do not depend on row order.
+        for index, channel in enumerate(channels, start=1):
+            ids = {
+                "spend": f"EV-CHSPEND-{index:03d}",
+                "attributed_revenue": f"EV-CHATTR-{index:03d}",
+                "roas": f"EV-CHROAS-{index:03d}",
+            }
+            channel_ads = [row["source_ref"] for row in ads if row["channel"] == channel]
+            channel_attributed = [row for row in attributed if row["channel"] == channel]
+            channel_revenue_refs = [row["source_ref"] for row in channel_attributed]
+            channel_joins = [row["crm_ref"] for row in channel_attributed]
+            channel_revenue = sum((row["value"] for row in channel_attributed), Decimal("0"))
             spend = spend_by_channel[channel]
             roas = Decimal("0") if spend == 0 else channel_revenue / spend
+            roas_value = str(roas.quantize(Decimal("0.01")))
             channel_rows.append(
                 {
                     "channel": channel,
                     "spend_aed": _money(spend),
                     "attributed_revenue_aed": _money(channel_revenue),
-                    "assumption_dependent_roas": str(roas.quantize(Decimal("0.01"))),
+                    "assumption_dependent_roas": roas_value,
                     "evidence_grade": "assumption-dependent",
+                    "evidence_ids": ids,
                 }
+            )
+            dimensions = {"channel": channel}
+            channel_claims.extend(
+                [
+                    _claim(
+                        ids["spend"], "channel_accepted_ad_spend", _money(spend), "AED", "reconciled",
+                        f"Sum of accepted advertising rows for the {channel} channel.",
+                        {"summand": channel_ads}, dimensions=dimensions,
+                    ),
+                    _claim(
+                        ids["attributed_revenue"], "channel_attributed_revenue", _money(channel_revenue),
+                        "AED", "assumption-dependent",
+                        f"Attributed revenue whose CRM campaign maps to the {channel} channel.",
+                        {"summand": channel_revenue_refs, "join": channel_joins},
+                        attribution_assumption, dimensions,
+                    ),
+                    _claim(
+                        ids["roas"], "channel_assumption_dependent_roas", roas_value, "ratio",
+                        "assumption-dependent",
+                        f"Attributed revenue (numerator rows) divided by accepted spend (denominator rows) "
+                        f"for the {channel} channel; not a causal return.",
+                        {"numerator": channel_revenue_refs, "denominator": channel_ads, "join": channel_joins},
+                        attribution_assumption, dimensions,
+                    ),
+                ]
             )
 
         sensitivity: list[dict[str, Any]] = []
+        window_claims: list[Claim] = []
         for window in (30, 60, 90):
-            within = sum(
-                (row["value"] for row in attributed if row["delay_days"] <= window),
-                Decimal("0"),
-            )
+            ids = {"attributed": f"EV-WINATTR-{window:03d}", "excluded": f"EV-WINEXCL-{window:03d}"}
+            inside = [row for row in attributed if row["delay_days"] <= window]
+            outside = [row for row in attributed if row["delay_days"] > window]
+            within = sum((row["value"] for row in inside), Decimal("0"))
             sensitivity.append(
                 {
                     "attribution_window_days": window,
                     "attributed_revenue_aed": _money(within),
                     "excluded_delayed_revenue_aed": _money(attributed_total - within),
+                    "evidence_ids": ids,
                 }
+            )
+            dimensions = {"window_days": str(window)}
+            window_claims.extend(
+                [
+                    _claim(
+                        ids["attributed"], "window_attributed_revenue", _money(within), "AED",
+                        "assumption-dependent",
+                        f"Attributed revenue received within {window} days of lead creation.",
+                        {"summand": [row["source_ref"] for row in inside], "join": [row["crm_ref"] for row in inside]},
+                        attribution_assumption, dimensions,
+                    ),
+                    _claim(
+                        ids["excluded"], "window_excluded_delayed_revenue", _money(attributed_total - within),
+                        "AED", "assumption-dependent",
+                        f"Attributed revenue received more than {window} days after lead creation.",
+                        {"summand": [row["source_ref"] for row in outside], "join": [row["crm_ref"] for row in outside]},
+                        attribution_assumption, dimensions,
+                    ),
+                ]
             )
 
         ad_refs = [row["source_ref"] for row in ads]
@@ -389,6 +454,8 @@ class EvidenceEngine:
                 },
             ),
         ]
+        claims.extend(channel_claims)
+        claims.extend(window_claims)
 
         ordered = self._complete_dispositions(
             dispositions, {"ads": ads_rows, "crm": crm_rows, "revenue": revenue_rows}
@@ -498,6 +565,9 @@ class EvidenceEngine:
                 }
                 if not campaign_id or not channel:
                     raise ValueError("campaign_id and channel are required")
+                if any(mark in value for value in (campaign_id, channel) for mark in "[]"):
+                    # Labels reach the narrative gate; a bracket could imitate a citation.
+                    raise ValueError("campaign_id and channel must not contain square brackets")
             except ValueError as exc:
                 _dispose(dispositions, "ads", source_row, record_id, REJECTED, str(exc))
                 continue
@@ -717,11 +787,15 @@ def write_outputs(report: EvidenceReport, output_dir: str | Path) -> None:
 
 def _brief(report: EvidenceReport) -> str:
     channels = "\n".join(
-        f"- **{row['channel']}** — spend AED {row['spend_aed']}; attributed revenue AED {row['attributed_revenue_aed']}; assumption-dependent ROAS {row['assumption_dependent_roas']}×."
+        f"- **{row['channel']}** — spend AED {row['spend_aed']} `[{row['evidence_ids']['spend']}]`; "
+        f"attributed revenue AED {row['attributed_revenue_aed']} `[{row['evidence_ids']['attributed_revenue']}]`; "
+        f"assumption-dependent ROAS {row['assumption_dependent_roas']}× `[{row['evidence_ids']['roas']}]`."
         for row in report.channels
     )
     sensitivity = "\n".join(
-        f"- {row['attribution_window_days']} days: AED {row['attributed_revenue_aed']} attributed; AED {row['excluded_delayed_revenue_aed']} excluded."
+        f"- {row['attribution_window_days']} days: AED {row['attributed_revenue_aed']} attributed "
+        f"`[{row['evidence_ids']['attributed']}]`; AED {row['excluded_delayed_revenue_aed']} excluded "
+        f"`[{row['evidence_ids']['excluded']}]`."
         for row in report.sensitivity
     )
     return f"""# Executive Evidence Brief — Synthetic Demonstration

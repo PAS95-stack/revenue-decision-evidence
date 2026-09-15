@@ -44,8 +44,12 @@ OUTPUT_FILES = (
 
 
 def narrative(body: str) -> str:
-    """The currently required approval boundary. Phase 2 changes it here only."""
-    return f"{body} Human approval is required."
+    """Model text only.
+
+    The approval boundary is appended by the application (finalize_narrative)
+    and may not appear in model text, so nothing is added here.
+    """
+    return body
 
 
 def source_amounts(ads: Path = ADS, revenue: Path = REVENUE) -> dict[str, Decimal]:
