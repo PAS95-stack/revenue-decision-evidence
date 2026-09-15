@@ -62,6 +62,19 @@ python3 -I src/revenue_evidence/reconstruct.py \
 Optional: `--as-of YYYY-MM-DD` records a reporting date. The clock is never
 read, so identical inputs produce byte-identical outputs.
 
+## Walkthrough
+
+```bash
+scripts/demo.sh --no-pause
+```
+
+Runs from the original CSVs, shows every row status, rebuilds figures from their
+raw rows, feeds the narrative gate a false revenue figure, tampers with a
+published report, reorders contradictory rows and removes all revenue rows. Each
+step checks its expected result and the script stops if one is wrong. Omit
+`--no-pause` to step through it; the spoken guide is in
+[`docs/demo-script.md`](docs/demo-script.md).
+
 ## Outputs
 
 | File | Contents |

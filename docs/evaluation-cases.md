@@ -2,7 +2,7 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 96 tests, all passing on Python 3.13 on 15 September 2026, in about
+**Result:** 98 tests, all passing on Python 3.13 on 15 September 2026, in about
 two seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
@@ -112,3 +112,10 @@ minimum.
 | ID | Required behaviour |
 |---|---|
 | o01 | `outputs/synthetic-case` matches a fresh run byte for byte |
+
+## Walkthrough and known gaps (`test_demo_script.py`)
+
+| ID | Required behaviour |
+|---|---|
+| w04 | `scripts/demo.sh` runs to completion and every step gets its expected exit code |
+| k01 | Known gap, pinned so a fix is noticed: a correct number cited to the right evidence but described as a different metric passes the gate |
