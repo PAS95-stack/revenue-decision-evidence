@@ -14,16 +14,25 @@ def main() -> int:
     parser.add_argument("--revenue", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument(
+        "--as-of",
+        help="Optional reporting date (YYYY-MM-DD) recorded in the report; the clock is never read",
+    )
+    parser.add_argument(
         "--azure-narrative",
         action="store_true",
         help="Send computed evidence records only to a configured Azure OpenAI deployment",
     )
     args = parser.parse_args()
-    report = EvidenceEngine().run(args.ads, args.crm, args.revenue)
+    report = EvidenceEngine().run(args.ads, args.crm, args.revenue, as_of=args.as_of)
     if args.azure_narrative:
         report.narrative = generate_azure_narrative(report)
     write_outputs(report, args.output)
-    print(json.dumps({"run_id": report.run_id, "output": args.output}, indent=2))
+    print(
+        json.dumps(
+            {"run_id": report.run_id, "engine_version": report.engine_version, "output": args.output},
+            indent=2,
+        )
+    )
     return 0
 
 

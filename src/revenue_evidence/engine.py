@@ -3,15 +3,38 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from html import escape
 from pathlib import Path
 from typing import Any, Iterable
 
 
 MONEY = Decimal("0.01")
+
+# Part of every run_id: a change to the computation must not reuse an old identity.
+# Kept equal to pyproject.toml's version by test.
+ENGINE_VERSION = "0.2.0"
+
+# Every threshold and window the report depends on, published in the report. The
+# whole content (not just the version label) is hashed into run_id.
+RULESET: dict[str, Any] = {
+    "id": "pas95-revenue-evidence-rules",
+    "version": "1",
+    "attribution_windows_days": [30, 60, 90],
+    "coverage_threshold_percent": "80",
+    "coverage_threshold_basis": (
+        "planning choice used only to flag weak attribution coverage; not a validated decision threshold"
+    ),
+}
+
+REASON_CONFLICTING_LEAD = "lead_id has conflicting CRM records; revenue cannot be attributed"
+REASON_NO_LEAD = "lead_id has no accepted CRM record; revenue cannot be attributed"
+REASON_CONFLICTING_CAMPAIGN = "CRM campaign_id maps to conflicting advertising channels"
+REASON_NO_CAMPAIGN = "CRM campaign_id has no accepted advertising record"
+REASON_CHRONOLOGY = "revenue date precedes lead creation date"
 
 # Every input row receives exactly one status. Only the two "accepted" statuses
 # may contribute to a total; the others are visible but excluded.
@@ -80,7 +103,11 @@ class Claim:
 @dataclass
 class EvidenceReport:
     run_id: str
-    generated_at: str
+    # An optional reporting date supplied by the caller. The wall clock is never
+    # read, so identical inputs produce identical bytes.
+    as_of: str | None
+    engine_version: str
+    ruleset: dict[str, Any]
     source_fingerprints: dict[str, str]
     summary: dict[str, Any]
     channels: list[dict[str, Any]]
@@ -229,7 +256,13 @@ class EvidenceEngine:
         ads_path: str | Path,
         crm_path: str | Path,
         revenue_path: str | Path,
+        as_of: str | None = None,
     ) -> EvidenceReport:
+        if as_of is not None:
+            try:
+                as_of = _parse_date(as_of, "as_of").isoformat()
+            except ValueError as exc:
+                raise InputContractError(str(exc)) from exc
         ads_path, crm_path, revenue_path = map(Path, (ads_path, crm_path, revenue_path))
         ads_rows = _read_csv(ads_path, self.ADS_FIELDS)
         crm_rows = _read_csv(crm_path, self.CRM_FIELDS)
@@ -258,16 +291,16 @@ class EvidenceEngine:
             lead = leads_by_id.get(row["lead_id"])
             channel = campaign_to_channel.get(lead["campaign_id"]) if lead else None
             if lead is None and row["lead_id"] in conflicting_leads:
-                reason = "lead_id has conflicting CRM records; revenue cannot be attributed"
+                reason = REASON_CONFLICTING_LEAD
                 conflicted_revenue.append(row)
             elif lead is None:
-                reason = "lead_id has no accepted CRM record; revenue cannot be attributed"
+                reason = REASON_NO_LEAD
             elif channel is None and lead["campaign_id"] in conflicted_campaigns:
-                reason = "CRM campaign_id maps to conflicting advertising channels"
+                reason = REASON_CONFLICTING_CAMPAIGN
             elif channel is None:
-                reason = "CRM campaign_id has no accepted advertising record"
+                reason = REASON_NO_CAMPAIGN
             elif (row["date"] - lead["created_at"]).days < 0:
-                reason = "revenue date precedes lead creation date"
+                reason = REASON_CHRONOLOGY
             else:
                 reason = ""
             if reason:
@@ -351,7 +384,7 @@ class EvidenceEngine:
 
         sensitivity: list[dict[str, Any]] = []
         window_claims: list[Claim] = []
-        for window in (30, 60, 90):
+        for window in RULESET["attribution_windows_days"]:
             ids = {"attributed": f"EV-WINATTR-{window:03d}", "excluded": f"EV-WINEXCL-{window:03d}"}
             inside = [row for row in attributed if row["delay_days"] <= window]
             outside = [row for row in attributed if row["delay_days"] > window]
@@ -479,18 +512,33 @@ class EvidenceEngine:
             for source, rows in (("ads", ads_rows), ("crm", crm_rows), ("revenue", revenue_rows))
         }
 
-        recommendation = self._recommend(channel_rows, coverage, rejected)
+        recommendation = self._recommend(
+            coverage,
+            str((coverage * 100).quantize(Decimal("0.1"))),
+            ordered,
+            _money(unattributed_total),
+            _money(conflicted_total),
+            sensitivity[0],
+        )
         fingerprints = {
             "ads": _fingerprint(ads_path),
             "crm": _fingerprint(crm_path),
             "revenue": _fingerprint(revenue_path),
         }
-        run_id = hashlib.sha256(
-            "|".join(fingerprints.values()).encode("utf-8")
-        ).hexdigest()[:16]
+        ruleset = json.loads(json.dumps(RULESET))
+        ruleset_fingerprint = hashlib.sha256(
+            json.dumps(ruleset, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        identity = "\n".join(
+            [f"engine:{ENGINE_VERSION}", f"ruleset:{ruleset_fingerprint}", f"as_of:{as_of or ''}"]
+            + [f"{source}:{digest}" for source, digest in sorted(fingerprints.items())]
+        )
+        run_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
         return EvidenceReport(
             run_id=run_id,
-            generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+            as_of=as_of,
+            engine_version=ENGINE_VERSION,
+            ruleset={**ruleset, "fingerprint": ruleset_fingerprint},
             source_fingerprints=fingerprints,
             summary={
                 "accepted_spend_aed": _money(spend_total),
@@ -680,37 +728,78 @@ class EvidenceEngine:
 
     @staticmethod
     def _recommend(
-        channels: list[dict[str, Any]],
         coverage: Decimal,
-        rejected: list[RejectedRecord],
+        coverage_percent: str,
+        dispositions: list[RowDisposition],
+        unattributed_aed: str,
+        conflicted_aed: str,
+        shortest_window: dict[str, Any],
     ) -> dict[str, Any]:
-        if coverage < Decimal("0.80"):
-            return {
-                "action": "request-more-evidence",
-                "decision": "Do not reallocate budget from this evidence set.",
-                "reason": "Revenue attribution coverage is below 80%.",
-                "evidence_grade": "unsupported",
-                "human_approval_required": True,
-            }
-        if any(row.severity == "rejected" for row in rejected):
-            return {
-                "action": "hold",
-                "decision": "Hold the current allocation while rejected records are corrected.",
-                "reason": "At least one source record failed deterministic validation.",
-                "evidence_grade": "assumption-dependent",
-                "human_approval_required": True,
-            }
-        ranked = sorted(
-            channels,
-            key=lambda row: Decimal(row["assumption_dependent_roas"]),
-            reverse=True,
+        """Data-quality findings and open questions; never a budget move.
+
+        Attribution through CRM campaigns cannot show that spend caused revenue,
+        and neither a coverage threshold nor an approval step changes that. The
+        output is therefore what the exports substantiate and what must be
+        checked next, whatever the coverage.
+        """
+        threshold = Decimal(RULESET["coverage_threshold_percent"])
+        below_threshold = coverage * 100 < threshold
+        excluded = Counter(row.status for row in dispositions if row.status in {REJECTED, DUPLICATE, CONFLICT})
+        unattributed_reasons = {row.reason for row in dispositions if row.status == ACCEPTED_UNATTRIBUTED}
+
+        findings: list[str] = []
+        questions: list[str] = []
+        if below_threshold:
+            findings.append(
+                f"Attribution coverage is {coverage_percent}% [EV-COVER-001], below the rule set's "
+                f"reporting threshold of {RULESET['coverage_threshold_percent']}%."
+            )
+        if Decimal(unattributed_aed) > 0:
+            findings.append(
+                f"AED {unattributed_aed} of accepted revenue could not be assigned to a channel [EV-UNMATCH-001]."
+            )
+        if Decimal(conflicted_aed) > 0:
+            findings.append(
+                f"AED {conflicted_aed} of that revenue belongs to leads with contradictory CRM records [EV-CONFLICT-001]."
+            )
+            questions.append("Which campaign is correct for each lead with contradictory CRM records?")
+        if excluded:
+            findings.append(
+                f"{excluded[REJECTED]} rejected, {excluded[DUPLICATE]} duplicate and {excluded[CONFLICT]} "
+                "conflicting source rows are excluded from every figure; each is listed in row_dispositions.csv."
+            )
+            questions.append("Can the source systems correct or confirm the rejected, duplicate and conflicting rows?")
+        window = shortest_window["attribution_window_days"]
+        delayed = shortest_window["excluded_delayed_revenue_aed"]
+        if Decimal(delayed) > 0:
+            findings.append(
+                f"AED {delayed} of attributed revenue arrived more than {window} days after lead creation "
+                f"[{shortest_window['evidence_ids']['excluded']}], so channel figures change with the attribution window."
+            )
+        if REASON_NO_LEAD in unattributed_reasons:
+            questions.append("Can the CRM export include the leads referenced by unattributed transactions?")
+        if REASON_NO_CAMPAIGN in unattributed_reasons:
+            questions.append("Can the advertising export include every campaign referenced by CRM leads?")
+        if REASON_CHRONOLOGY in unattributed_reasons:
+            questions.append("Why are some transactions dated before their lead was created?")
+        questions.append(
+            "What comparison or controlled test would the budget owner accept as evidence that changing "
+            "channel spend changes revenue?"
         )
-        best = ranked[0]["channel"] if ranked else "no channel"
+
+        reasons = []
+        if below_threshold:
+            reasons.append("Attribution coverage is below the rule set's reporting threshold.")
+        if excluded:
+            reasons.append("Some source rows were rejected, duplicated or in conflict.")
+        reasons.append("Channel figures are attribution-based and do not show that spend caused revenue.")
         return {
-            "action": "bounded-test",
-            "decision": f"If the budget owner agrees, test at most a 10% reallocation toward {best}.",
-            "reason": "Coverage is adequate, but channel attribution remains assumption-dependent.",
-            "evidence_grade": "assumption-dependent",
+            "action": "request-more-evidence" if below_threshold or excluded else "review-evidence",
+            "decision": "Do not reallocate budget from this evidence set alone.",
+            "reason": " ".join(reasons),
+            "evidence_grade": "unsupported" if below_threshold else "assumption-dependent",
+            "findings": findings,
+            "questions": questions,
             "human_approval_required": True,
         }
 
@@ -719,7 +808,7 @@ def write_outputs(report: EvidenceReport, output_dir: str | Path) -> None:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     (output / "report.json").write_text(
-        json.dumps(report.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps(report.to_dict(), indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
     )
 
     with (output / "rejected_records.csv").open("w", encoding="utf-8", newline="") as handle:
@@ -781,11 +870,23 @@ def write_outputs(report: EvidenceReport, output_dir: str | Path) -> None:
         },
     }
     (output / "evaluation_results.json").write_text(
-        json.dumps(evaluation, indent=2), encoding="utf-8"
+        json.dumps(evaluation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
 
 def _brief(report: EvidenceReport) -> str:
+    recommendation = report.recommendation
+    as_of_line = f"**As of:** {report.as_of}  \n" if report.as_of else ""
+    engine_line = (
+        f"**Engine:** {report.engine_version} · **Rule set:** {report.ruleset['id']} "
+        f"version {report.ruleset['version']}"
+    )
+    findings = "\n".join(f"- {item}" for item in recommendation["findings"]) or "- None."
+    questions = "\n".join(f"- {item}" for item in recommendation["questions"])
+    threshold_line = (
+        f"Coverage threshold: {report.ruleset['coverage_threshold_percent']}% — "
+        f"{report.ruleset['coverage_threshold_basis']}."
+    )
     channels = "\n".join(
         f"- **{row['channel']}** — spend AED {row['spend_aed']} `[{row['evidence_ids']['spend']}]`; "
         f"attributed revenue AED {row['attributed_revenue_aed']} `[{row['evidence_ids']['attributed_revenue']}]`; "
@@ -803,6 +904,7 @@ def _brief(report: EvidenceReport) -> str:
 **Evidence status:** synthetic and reproducible; not a customer result, real-data deployment, reference, or paid validation.
 **Run ID:** `{report.run_id}`
 **Decision status:** not approved; named budget-owner approval is required.
+{as_of_line}{engine_line}
 
 ## Decision question
 
@@ -830,7 +932,17 @@ What can the supplied advertising, CRM, and revenue exports defend about the nex
 
 **{report.recommendation['decision']}**
 
-Reason: {report.recommendation['reason']} This recommendation is graded **{report.recommendation['evidence_grade']}** and cannot be executed without human approval.
+Reason: {recommendation['reason']} This recommendation is graded **{recommendation['evidence_grade']}** and cannot be executed without human approval.
+
+### What the exports show
+
+{findings}
+
+### Questions that need answers before any budget decision
+
+{questions}
+
+{threshold_line}
 
 ## What the evidence cannot defend
 
@@ -846,13 +958,22 @@ The accountable budget owner must choose **approve**, **reject**, or **request m
 
 
 def _html(report: EvidenceReport) -> str:
+    # Source labels come from customer files; nothing from them is trusted as markup.
     rows = "".join(
         "<tr>"
-        f"<td>{row['channel']}</td><td>AED {row['spend_aed']}</td>"
-        f"<td>AED {row['attributed_revenue_aed']}</td>"
-        f"<td>{row['assumption_dependent_roas']}×</td>"
-        f"<td>{row['evidence_grade']}</td></tr>"
+        f"<td>{escape(row['channel'])}</td><td>AED {escape(row['spend_aed'])}</td>"
+        f"<td>AED {escape(row['attributed_revenue_aed'])}</td>"
+        f"<td>{escape(row['assumption_dependent_roas'])}×</td>"
+        f"<td>{escape(row['evidence_grade'])}</td></tr>"
         for row in report.channels
+    )
+    recommendation = report.recommendation
+    findings = "".join(f"<li>{escape(item)}</li>" for item in recommendation["findings"])
+    questions = "".join(f"<li>{escape(item)}</li>" for item in recommendation["questions"])
+    identity = (
+        f"Run <code>{escape(report.run_id)}</code> · engine {escape(report.engine_version)} · "
+        f"rule set {escape(report.ruleset['id'])} version {escape(report.ruleset['version'])}"
+        + (f" · as of {escape(report.as_of)}" if report.as_of else "")
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -861,7 +982,7 @@ def _html(report: EvidenceReport) -> str:
 body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f4f7fb;color:#17233b}}main{{max-width:960px;margin:40px auto;padding:0 24px}}.tag{{display:inline-block;background:#fff1cf;color:#6f4d00;padding:7px 10px;border-radius:16px;font-weight:700}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin:22px 0}}.card,section{{background:white;border:1px solid #dbe4f0;border-radius:12px;padding:20px;box-shadow:0 4px 16px #18233a0a}}.metric{{font-size:28px;font-weight:800;color:#173f7a}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:10px;border-bottom:1px solid #e4e9f0}}.warn{{border-left:5px solid #d18a00}}.approval{{border-left:5px solid #b42318}}small{{color:#596579}}h1,h2{{color:#183e73}}</style>
 </head><body><main>
 <span class="tag">SYNTHETIC DEMONSTRATION — NOT CUSTOMER VALIDATION</span>
-<h1>Revenue Decision Evidence</h1><p>Run <code>{report.run_id}</code>. Deterministic result; human approval required.</p>
+<h1>Revenue Decision Evidence</h1><p>{identity}. Deterministic result; human approval required.</p>
 <div class="grid">
 <div class="card"><small>Accepted spend</small><div class="metric">AED {report.summary['accepted_spend_aed']}</div><small>EV-SPEND-001</small></div>
 <div class="card"><small>Accepted revenue</small><div class="metric">AED {report.summary['accepted_revenue_aed']}</div><small>EV-REV-001</small></div>
@@ -869,6 +990,6 @@ body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f4f7fb;color:#1723
 <div class="card"><small>Rows needing attention</small><div class="metric">{report.summary['rejected_or_uncertain_rows']}</div><small>Visible, never repaired silently</small></div>
 </div>
 <section><h2>Channel evidence</h2><table><thead><tr><th>Channel</th><th>Spend</th><th>Attributed revenue</th><th>ROAS</th><th>Grade</th></tr></thead><tbody>{rows}</tbody></table></section>
-<section class="warn"><h2>Recommendation</h2><p><strong>{report.recommendation['decision']}</strong></p><p>{report.recommendation['reason']}</p><p>Evidence grade: {report.recommendation['evidence_grade']}.</p></section>
+<section class="warn"><h2>Recommendation</h2><p><strong>{escape(recommendation['decision'])}</strong></p><p>{escape(recommendation['reason'])}</p><p>Evidence grade: {escape(recommendation['evidence_grade'])}.</p><h3>What the exports show</h3><ul>{findings or '<li>None.</li>'}</ul><h3>Questions that need answers before any budget decision</h3><ul>{questions}</ul><p><small>Coverage threshold {escape(report.ruleset['coverage_threshold_percent'])}%: {escape(report.ruleset['coverage_threshold_basis'])}.</small></p></section>
 <section class="approval"><h2>Approval gate</h2><p>Status: <strong>not approved</strong>. The accountable budget owner must approve, reject, or request more evidence. No action is automated.</p></section>
 </main></body></html>"""

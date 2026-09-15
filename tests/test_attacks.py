@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,7 @@ MONEY_FIELDS = {"ads": "spend_aed", "revenue": "value_aed"}
 OUTPUT_FILES = (
     "report.json",
     "lineage.csv",
+    "row_dispositions.csv",
     "rejected_records.csv",
     "executive_brief.md",
     "report.html",
@@ -243,11 +245,21 @@ class OutputIntegrityAttackTests(unittest.TestCase):
             ("second", datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc)),
         ):
             FixedClock.instant = instant
-            with mock.patch.object(engine_module, "datetime", FixedClock):
+            # create=True: once the engine stops importing datetime this patch has
+            # nothing to replace, so the timestamp scan below is what keeps the
+            # test able to fail if any clock value re-enters the outputs.
+            with mock.patch.object(engine_module, "datetime", FixedClock, create=True):
                 report = EvidenceEngine().run(ADS, CRM, REVENUE)
             target = self.root / label
             write_outputs(report, target)
             outputs.append(target)
+
+        for name in OUTPUT_FILES:
+            with self.subTest(output=name, check="no timestamp"):
+                self.assertIsNone(
+                    re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", (outputs[0] / name).read_text(encoding="utf-8")),
+                    f"{name} contains a clock timestamp",
+                )
 
         for name in OUTPUT_FILES:
             with self.subTest(output=name):
