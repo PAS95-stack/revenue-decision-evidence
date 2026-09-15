@@ -12,7 +12,12 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from revenue_evidence.engine import EvidenceEngine, InputContractError, write_outputs
-from revenue_evidence.narrative import evidence_payload, validate_narrative
+from revenue_evidence.narrative import (
+    BOUNDARY_STATEMENT,
+    evidence_payload,
+    finalize_narrative,
+    validate_narrative,
+)
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -61,7 +66,14 @@ class EvidenceEngineTests(unittest.TestCase):
         report = self.run_report()
         self.assertEqual(report.summary["accepted_spend_aed"], "150.00")
         self.assertEqual(report.summary["attributed_revenue_aed"], "400.00")
-        self.assertTrue(all(claim.source_refs for claim in report.claims))
+        for claim in report.claims:
+            if Decimal(claim.value) == 0:
+                # A zero total adds up no rows; listing rows would break reconstruction.
+                self.assertFalse(
+                    [e for e in claim.lineage if e["role"] == "summand"], claim.evidence_id
+                )
+            else:
+                self.assertTrue(claim.source_refs, claim.evidence_id)
 
     def test_02_missing_ids_are_rejected(self):
         write_csv(
@@ -145,12 +157,16 @@ class EvidenceEngineTests(unittest.TestCase):
 
     def test_11_supported_ai_narrative_passes(self):
         report = self.run_report()
-        valid, reason = validate_narrative(
-            "Accepted spend is recorded [EV-SPEND-001]. Human approval is required.",
-            report,
-        )
+        # The model no longer states the approval boundary; the application appends it.
+        text = "Accepted spend is AED 150.00 [EV-SPEND-001]."
+        valid, reason = validate_narrative(text, report)
         self.assertTrue(valid, reason)
-        self.assertNotIn("source_rows", evidence_payload(report))
+        self.assertTrue(finalize_narrative(text).endswith(BOUNDARY_STATEMENT))
+        payload = evidence_payload(report)
+        self.assertNotIn("source_rows", payload)
+        for claim in payload["claims"]:
+            self.assertNotIn("source_refs", claim)
+            self.assertNotIn("lineage", claim)
 
     def test_12_revenue_before_lead_is_not_attributed(self):
         write_csv(

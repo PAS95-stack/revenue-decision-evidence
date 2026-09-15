@@ -1,0 +1,25 @@
+source,source_row,record_id,status,reason,amount_aed,supports
+ads,2,CMP-SEARCH-01,accepted,,5000.00,EV-SPEND-001:summand;EV-CHSPEND-002:summand;EV-CHROAS-002:denominator
+ads,3,CMP-SOCIAL-01,accepted,,4500.00,EV-SPEND-001:summand;EV-CHSPEND-003:summand;EV-CHROAS-003:denominator
+ads,4,CMP-EMAIL-01,accepted,,1000.00,EV-SPEND-001:summand;EV-CHSPEND-001:summand;EV-CHROAS-001:denominator
+ads,5,CMP-SEARCH-01,accepted,,2500.00,EV-SPEND-001:summand;EV-CHSPEND-002:summand;EV-CHROAS-002:denominator
+ads,6,CMP-SOCIAL-01,accepted,,2000.00,EV-SPEND-001:summand;EV-CHSPEND-003:summand;EV-CHROAS-003:denominator
+ads,7,CMP-SOCIAL-01,duplicate,exact duplicate advertising row,2000.00,
+ads,8,CMP-BROKEN-01,rejected,spend_aed must be a plain non-negative decimal such as 1000 or 1000.50,,
+crm,2,LEAD-001,accepted,,,EV-ATTR-001:join;EV-COVER-001:join;EV-CHATTR-002:join;EV-CHROAS-002:join;EV-WINATTR-030:join;EV-WINATTR-060:join;EV-WINATTR-090:join
+crm,3,LEAD-002,conflict,lead_id has conflicting campaign attribution,,EV-CONFLICT-001:join
+crm,4,LEAD-003,accepted,,,EV-ATTR-001:join;EV-COVER-001:join;EV-CHATTR-003:join;EV-CHROAS-003:join;EV-WINATTR-030:join;EV-WINATTR-060:join;EV-WINATTR-090:join
+crm,5,LEAD-004,accepted,,,
+crm,6,LEAD-005,accepted,,,EV-ATTR-001:join;EV-COVER-001:join;EV-CHATTR-001:join;EV-CHROAS-001:join;EV-WINEXCL-030:join;EV-WINATTR-060:join;EV-WINATTR-090:join
+crm,7,LEAD-006,accepted,,,
+crm,8,LEAD-002,conflict,lead_id has conflicting campaign attribution,,EV-CONFLICT-001:join
+crm,9,row-9,rejected,lead_id and campaign_id are required,,
+revenue,2,TX-001,accepted,,16000.00,EV-REV-001:summand;EV-ATTR-001:summand;EV-COVER-001:numerator;EV-COVER-001:denominator;EV-CHATTR-002:summand;EV-CHROAS-002:numerator;EV-WINATTR-030:summand;EV-WINATTR-060:summand;EV-WINATTR-090:summand
+revenue,3,TX-002,accepted-unattributed,lead_id has conflicting CRM records; revenue cannot be attributed,9000.00,EV-REV-001:summand;EV-COVER-001:denominator;EV-UNMATCH-001:summand;EV-CONFLICT-001:summand
+revenue,4,TX-003,accepted,,12500.00,EV-REV-001:summand;EV-ATTR-001:summand;EV-COVER-001:numerator;EV-COVER-001:denominator;EV-CHATTR-003:summand;EV-CHROAS-003:numerator;EV-WINATTR-030:summand;EV-WINATTR-060:summand;EV-WINATTR-090:summand
+revenue,5,TX-004,accepted,,3500.00,EV-REV-001:summand;EV-ATTR-001:summand;EV-COVER-001:numerator;EV-COVER-001:denominator;EV-CHATTR-001:summand;EV-CHROAS-001:numerator;EV-WINEXCL-030:summand;EV-WINATTR-060:summand;EV-WINATTR-090:summand
+revenue,6,TX-005,accepted-unattributed,CRM campaign_id has no accepted advertising record,7000.00,EV-REV-001:summand;EV-COVER-001:denominator;EV-UNMATCH-001:summand
+revenue,7,TX-006,accepted-unattributed,lead_id has no accepted CRM record; revenue cannot be attributed,6000.00,EV-REV-001:summand;EV-COVER-001:denominator;EV-UNMATCH-001:summand
+revenue,8,TX-003,duplicate,duplicate transaction_id,12500.00,
+revenue,9,TX-007,rejected,value_aed must be a plain non-negative decimal such as 1000 or 1000.50,,
+revenue,10,TX-008,accepted-unattributed,revenue date precedes lead creation date,2500.00,EV-REV-001:summand;EV-COVER-001:denominator;EV-UNMATCH-001:summand

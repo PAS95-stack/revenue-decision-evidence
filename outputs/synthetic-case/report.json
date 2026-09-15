@@ -1,72 +1,73 @@
 {
-  "run_id": "91859f94c0a9e170",
-  "generated_at": "2026-09-02T00:30:57+04:00",
-  "source_fingerprints": {
-    "ads": "3cab521ad2bd75e47336665ee4493d80bf49e544bee663007d4b82dd6e20e4d5",
-    "crm": "9fd8cc4e416aff5c44f9bd86879f0b3dd8ce489873d7193f28ab8c81d710a742",
-    "revenue": "a277bcfd8d641913bd1854328358a02e7baf7b5ab631d0ae61e90a19f3c8f76e"
-  },
-  "summary": {
-    "accepted_spend_aed": "15000.00",
-    "accepted_revenue_aed": "56500.00",
-    "attributed_revenue_aed": "41000.00",
-    "unattributed_or_invalid_revenue_aed": "15500.00",
-    "attribution_coverage_percent": "72.6",
-    "accepted_rows": {
-      "ads": 5,
-      "crm": 6,
-      "revenue": 7
-    },
-    "rejected_or_uncertain_rows": 9
-  },
+  "as_of": null,
   "channels": [
     {
-      "channel": "Email",
-      "spend_aed": "1000.00",
-      "attributed_revenue_aed": "3500.00",
       "assumption_dependent_roas": "3.50",
-      "evidence_grade": "assumption-dependent"
+      "attributed_revenue_aed": "3500.00",
+      "channel": "Email",
+      "evidence_grade": "assumption-dependent",
+      "evidence_ids": {
+        "attributed_revenue": "EV-CHATTR-001",
+        "roas": "EV-CHROAS-001",
+        "spend": "EV-CHSPEND-001"
+      },
+      "spend_aed": "1000.00"
     },
     {
+      "assumption_dependent_roas": "2.13",
+      "attributed_revenue_aed": "16000.00",
       "channel": "Paid Search",
-      "spend_aed": "7500.00",
-      "attributed_revenue_aed": "25000.00",
-      "assumption_dependent_roas": "3.33",
-      "evidence_grade": "assumption-dependent"
+      "evidence_grade": "assumption-dependent",
+      "evidence_ids": {
+        "attributed_revenue": "EV-CHATTR-002",
+        "roas": "EV-CHROAS-002",
+        "spend": "EV-CHSPEND-002"
+      },
+      "spend_aed": "7500.00"
     },
     {
-      "channel": "Paid Social",
-      "spend_aed": "6500.00",
-      "attributed_revenue_aed": "12500.00",
       "assumption_dependent_roas": "1.92",
-      "evidence_grade": "assumption-dependent"
-    }
-  ],
-  "sensitivity": [
-    {
-      "attribution_window_days": 30,
-      "attributed_revenue_aed": "28500.00",
-      "excluded_delayed_revenue_aed": "12500.00"
-    },
-    {
-      "attribution_window_days": 60,
-      "attributed_revenue_aed": "41000.00",
-      "excluded_delayed_revenue_aed": "0.00"
-    },
-    {
-      "attribution_window_days": 90,
-      "attributed_revenue_aed": "41000.00",
-      "excluded_delayed_revenue_aed": "0.00"
+      "attributed_revenue_aed": "12500.00",
+      "channel": "Paid Social",
+      "evidence_grade": "assumption-dependent",
+      "evidence_ids": {
+        "attributed_revenue": "EV-CHATTR-003",
+        "roas": "EV-CHROAS-003",
+        "spend": "EV-CHSPEND-003"
+      },
+      "spend_aed": "6500.00"
     }
   ],
   "claims": [
     {
+      "assumptions": [],
+      "dimensions": {},
       "evidence_id": "EV-SPEND-001",
-      "metric": "accepted_ad_spend",
-      "value": "15000.00",
-      "unit": "AED",
+      "explanation": "Sum of accepted advertising rows; invalid, duplicate and conflicting rows are excluded.",
       "grade": "reconciled",
-      "explanation": "Sum of accepted advertising rows after validation and duplicate removal.",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "ads:2"
+        },
+        {
+          "role": "summand",
+          "source_ref": "ads:3"
+        },
+        {
+          "role": "summand",
+          "source_ref": "ads:4"
+        },
+        {
+          "role": "summand",
+          "source_ref": "ads:5"
+        },
+        {
+          "role": "summand",
+          "source_ref": "ads:6"
+        }
+      ],
+      "metric": "accepted_ad_spend",
       "source_refs": [
         "ads:2",
         "ads:3",
@@ -74,15 +75,46 @@
         "ads:5",
         "ads:6"
       ],
-      "assumptions": []
+      "unit": "AED",
+      "value": "15000.00"
     },
     {
+      "assumptions": [],
+      "dimensions": {},
       "evidence_id": "EV-REV-001",
-      "metric": "accepted_revenue",
-      "value": "56500.00",
-      "unit": "AED",
+      "explanation": "Sum of accepted revenue rows, attributed or not; invalid, duplicate and conflicting rows are excluded.",
       "grade": "reconciled",
-      "explanation": "Sum of accepted revenue rows after validation and duplicate removal.",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:2"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:3"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:4"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:5"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:6"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:7"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:10"
+        }
+      ],
+      "metric": "accepted_revenue",
       "source_refs": [
         "revenue:2",
         "revenue:3",
@@ -92,151 +124,1062 @@
         "revenue:7",
         "revenue:10"
       ],
-      "assumptions": []
+      "unit": "AED",
+      "value": "56500.00"
     },
     {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {},
       "evidence_id": "EV-ATTR-001",
-      "metric": "attributed_revenue",
-      "value": "41000.00",
-      "unit": "AED",
-      "grade": "assumption-dependent",
       "explanation": "Revenue connected deterministically through revenue.lead_id to CRM campaign_id and advertising channel.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:2"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:4"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:5"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:2"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:4"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:6"
+        }
+      ],
+      "metric": "attributed_revenue",
       "source_refs": [
         "revenue:2",
+        "revenue:4",
+        "revenue:5",
         "crm:2",
+        "crm:4",
+        "crm:6"
+      ],
+      "unit": "AED",
+      "value": "32000.00"
+    },
+    {
+      "assumptions": [],
+      "dimensions": {},
+      "evidence_id": "EV-COVER-001",
+      "explanation": "Attributed revenue (numerator rows) as a share of accepted revenue (denominator rows).",
+      "grade": "reconciled",
+      "lineage": [
+        {
+          "role": "numerator",
+          "source_ref": "revenue:2"
+        },
+        {
+          "role": "numerator",
+          "source_ref": "revenue:4"
+        },
+        {
+          "role": "numerator",
+          "source_ref": "revenue:5"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "revenue:2"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "revenue:3"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "revenue:4"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "revenue:5"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "revenue:6"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "revenue:7"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "revenue:10"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:2"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:4"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:6"
+        }
+      ],
+      "metric": "revenue_attribution_coverage",
+      "source_refs": [
+        "revenue:2",
+        "revenue:4",
+        "revenue:5",
+        "revenue:3",
+        "revenue:6",
+        "revenue:7",
+        "revenue:10",
+        "crm:2",
+        "crm:4",
+        "crm:6"
+      ],
+      "unit": "percent",
+      "value": "56.6"
+    },
+    {
+      "assumptions": [],
+      "dimensions": {},
+      "evidence_id": "EV-UNMATCH-001",
+      "explanation": "Accepted revenue that could not be assigned to a channel: no accepted or unambiguous CRM lead, no accepted advertising campaign, or revenue dated before lead creation.",
+      "grade": "reconciled",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:3"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:6"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:7"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:10"
+        }
+      ],
+      "metric": "unattributed_or_invalid_revenue",
+      "source_refs": [
+        "revenue:3",
+        "revenue:6",
+        "revenue:7",
+        "revenue:10"
+      ],
+      "unit": "AED",
+      "value": "24500.00"
+    },
+    {
+      "assumptions": [],
+      "dimensions": {},
+      "evidence_id": "EV-CONFLICT-001",
+      "explanation": "Accepted revenue whose CRM lead has contradictory records; excluded from attribution instead of letting file order choose a campaign.",
+      "grade": "reconciled",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:3"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:3"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:8"
+        }
+      ],
+      "metric": "revenue_with_conflicting_lead_attribution",
+      "source_refs": [
         "revenue:3",
         "crm:3",
-        "revenue:4",
-        "crm:4",
+        "crm:8"
+      ],
+      "unit": "AED",
+      "value": "9000.00"
+    },
+    {
+      "assumptions": [],
+      "dimensions": {
+        "channel": "Email"
+      },
+      "evidence_id": "EV-CHSPEND-001",
+      "explanation": "Sum of accepted advertising rows for the Email channel.",
+      "grade": "reconciled",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "ads:4"
+        }
+      ],
+      "metric": "channel_accepted_ad_spend",
+      "source_refs": [
+        "ads:4"
+      ],
+      "unit": "AED",
+      "value": "1000.00"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "channel": "Email"
+      },
+      "evidence_id": "EV-CHATTR-001",
+      "explanation": "Attributed revenue whose CRM campaign maps to the Email channel.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:5"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:6"
+        }
+      ],
+      "metric": "channel_attributed_revenue",
+      "source_refs": [
         "revenue:5",
         "crm:6"
       ],
+      "unit": "AED",
+      "value": "3500.00"
+    },
+    {
       "assumptions": [
         "CRM campaign is treated as the governing source attribution."
-      ]
+      ],
+      "dimensions": {
+        "channel": "Email"
+      },
+      "evidence_id": "EV-CHROAS-001",
+      "explanation": "Attributed revenue (numerator rows) divided by accepted spend (denominator rows) for the Email channel; not a causal return.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "numerator",
+          "source_ref": "revenue:5"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "ads:4"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:6"
+        }
+      ],
+      "metric": "channel_assumption_dependent_roas",
+      "source_refs": [
+        "revenue:5",
+        "ads:4",
+        "crm:6"
+      ],
+      "unit": "ratio",
+      "value": "3.50"
     },
     {
-      "evidence_id": "EV-COVER-001",
-      "metric": "revenue_attribution_coverage",
-      "value": "72.6",
-      "unit": "percent",
+      "assumptions": [],
+      "dimensions": {
+        "channel": "Paid Search"
+      },
+      "evidence_id": "EV-CHSPEND-002",
+      "explanation": "Sum of accepted advertising rows for the Paid Search channel.",
       "grade": "reconciled",
-      "explanation": "Share of accepted revenue connected to an accepted CRM lead and advertising campaign.",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "ads:2"
+        },
+        {
+          "role": "summand",
+          "source_ref": "ads:5"
+        }
+      ],
+      "metric": "channel_accepted_ad_spend",
       "source_refs": [
-        "crm:2",
-        "crm:3",
-        "crm:4",
-        "crm:5",
-        "crm:6",
-        "crm:7",
+        "ads:2",
+        "ads:5"
+      ],
+      "unit": "AED",
+      "value": "7500.00"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "channel": "Paid Search"
+      },
+      "evidence_id": "EV-CHATTR-002",
+      "explanation": "Attributed revenue whose CRM campaign maps to the Paid Search channel.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:2"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:2"
+        }
+      ],
+      "metric": "channel_attributed_revenue",
+      "source_refs": [
         "revenue:2",
-        "revenue:3",
+        "crm:2"
+      ],
+      "unit": "AED",
+      "value": "16000.00"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "channel": "Paid Search"
+      },
+      "evidence_id": "EV-CHROAS-002",
+      "explanation": "Attributed revenue (numerator rows) divided by accepted spend (denominator rows) for the Paid Search channel; not a causal return.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "numerator",
+          "source_ref": "revenue:2"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "ads:2"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "ads:5"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:2"
+        }
+      ],
+      "metric": "channel_assumption_dependent_roas",
+      "source_refs": [
+        "revenue:2",
+        "ads:2",
+        "ads:5",
+        "crm:2"
+      ],
+      "unit": "ratio",
+      "value": "2.13"
+    },
+    {
+      "assumptions": [],
+      "dimensions": {
+        "channel": "Paid Social"
+      },
+      "evidence_id": "EV-CHSPEND-003",
+      "explanation": "Sum of accepted advertising rows for the Paid Social channel.",
+      "grade": "reconciled",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "ads:3"
+        },
+        {
+          "role": "summand",
+          "source_ref": "ads:6"
+        }
+      ],
+      "metric": "channel_accepted_ad_spend",
+      "source_refs": [
+        "ads:3",
+        "ads:6"
+      ],
+      "unit": "AED",
+      "value": "6500.00"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "channel": "Paid Social"
+      },
+      "evidence_id": "EV-CHATTR-003",
+      "explanation": "Attributed revenue whose CRM campaign maps to the Paid Social channel.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:4"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:4"
+        }
+      ],
+      "metric": "channel_attributed_revenue",
+      "source_refs": [
+        "revenue:4",
+        "crm:4"
+      ],
+      "unit": "AED",
+      "value": "12500.00"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "channel": "Paid Social"
+      },
+      "evidence_id": "EV-CHROAS-003",
+      "explanation": "Attributed revenue (numerator rows) divided by accepted spend (denominator rows) for the Paid Social channel; not a causal return.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "numerator",
+          "source_ref": "revenue:4"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "ads:3"
+        },
+        {
+          "role": "denominator",
+          "source_ref": "ads:6"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:4"
+        }
+      ],
+      "metric": "channel_assumption_dependent_roas",
+      "source_refs": [
+        "revenue:4",
+        "ads:3",
+        "ads:6",
+        "crm:4"
+      ],
+      "unit": "ratio",
+      "value": "1.92"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "window_days": "30"
+      },
+      "evidence_id": "EV-WINATTR-030",
+      "explanation": "Attributed revenue received within 30 days of lead creation.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:2"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:4"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:2"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:4"
+        }
+      ],
+      "metric": "window_attributed_revenue",
+      "source_refs": [
+        "revenue:2",
+        "revenue:4",
+        "crm:2",
+        "crm:4"
+      ],
+      "unit": "AED",
+      "value": "28500.00"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "window_days": "30"
+      },
+      "evidence_id": "EV-WINEXCL-030",
+      "explanation": "Attributed revenue received more than 30 days after lead creation.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:5"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:6"
+        }
+      ],
+      "metric": "window_excluded_delayed_revenue",
+      "source_refs": [
+        "revenue:5",
+        "crm:6"
+      ],
+      "unit": "AED",
+      "value": "3500.00"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "window_days": "60"
+      },
+      "evidence_id": "EV-WINATTR-060",
+      "explanation": "Attributed revenue received within 60 days of lead creation.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:2"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:4"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:5"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:2"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:4"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:6"
+        }
+      ],
+      "metric": "window_attributed_revenue",
+      "source_refs": [
+        "revenue:2",
         "revenue:4",
         "revenue:5",
-        "revenue:6",
-        "revenue:7",
-        "revenue:10"
+        "crm:2",
+        "crm:4",
+        "crm:6"
       ],
-      "assumptions": []
+      "unit": "AED",
+      "value": "32000.00"
     },
     {
-      "evidence_id": "EV-UNMATCH-001",
-      "metric": "unattributed_or_invalid_revenue",
-      "value": "15500.00",
-      "unit": "AED",
-      "grade": "reconciled",
-      "explanation": "Accepted revenue that could not be assigned to an advertising channel or had invalid chronology.",
-      "source_refs": [
-        "revenue:7"
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
       ],
-      "assumptions": []
+      "dimensions": {
+        "window_days": "60"
+      },
+      "evidence_id": "EV-WINEXCL-060",
+      "explanation": "Attributed revenue received more than 60 days after lead creation.",
+      "grade": "assumption-dependent",
+      "lineage": [],
+      "metric": "window_excluded_delayed_revenue",
+      "source_refs": [],
+      "unit": "AED",
+      "value": "0.00"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "window_days": "90"
+      },
+      "evidence_id": "EV-WINATTR-090",
+      "explanation": "Attributed revenue received within 90 days of lead creation.",
+      "grade": "assumption-dependent",
+      "lineage": [
+        {
+          "role": "summand",
+          "source_ref": "revenue:2"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:4"
+        },
+        {
+          "role": "summand",
+          "source_ref": "revenue:5"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:2"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:4"
+        },
+        {
+          "role": "join",
+          "source_ref": "crm:6"
+        }
+      ],
+      "metric": "window_attributed_revenue",
+      "source_refs": [
+        "revenue:2",
+        "revenue:4",
+        "revenue:5",
+        "crm:2",
+        "crm:4",
+        "crm:6"
+      ],
+      "unit": "AED",
+      "value": "32000.00"
+    },
+    {
+      "assumptions": [
+        "CRM campaign is treated as the governing source attribution."
+      ],
+      "dimensions": {
+        "window_days": "90"
+      },
+      "evidence_id": "EV-WINEXCL-090",
+      "explanation": "Attributed revenue received more than 90 days after lead creation.",
+      "grade": "assumption-dependent",
+      "lineage": [],
+      "metric": "window_excluded_delayed_revenue",
+      "source_refs": [],
+      "unit": "AED",
+      "value": "0.00"
     }
   ],
-  "rejected_records": [
+  "dispositions": [
     {
+      "amount_aed": "5000.00",
+      "reason": "",
+      "record_id": "CMP-SEARCH-01",
+      "source": "ads",
+      "source_row": 2,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "4500.00",
+      "reason": "",
+      "record_id": "CMP-SOCIAL-01",
+      "source": "ads",
+      "source_row": 3,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "1000.00",
+      "reason": "",
+      "record_id": "CMP-EMAIL-01",
+      "source": "ads",
+      "source_row": 4,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "2500.00",
+      "reason": "",
+      "record_id": "CMP-SEARCH-01",
+      "source": "ads",
+      "source_row": 5,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "2000.00",
+      "reason": "",
+      "record_id": "CMP-SOCIAL-01",
+      "source": "ads",
+      "source_row": 6,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "2000.00",
+      "reason": "exact duplicate advertising row",
+      "record_id": "CMP-SOCIAL-01",
       "source": "ads",
       "source_row": 7,
-      "record_id": "CMP-SOCIAL-01",
-      "severity": "rejected",
-      "reason": "exact duplicate advertising row"
+      "status": "duplicate"
     },
     {
+      "amount_aed": "",
+      "reason": "spend_aed must be a plain non-negative decimal such as 1000 or 1000.50",
+      "record_id": "CMP-BROKEN-01",
       "source": "ads",
       "source_row": 8,
-      "record_id": "CMP-BROKEN-01",
-      "severity": "rejected",
-      "reason": "spend_aed is not a number"
+      "status": "rejected"
     },
     {
+      "amount_aed": "",
+      "reason": "",
+      "record_id": "LEAD-001",
       "source": "crm",
-      "source_row": 8,
+      "source_row": 2,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "",
+      "reason": "lead_id has conflicting campaign attribution",
       "record_id": "LEAD-002",
-      "severity": "rejected",
-      "reason": "lead_id has conflicting campaign attribution"
+      "source": "crm",
+      "source_row": 3,
+      "status": "conflict"
     },
     {
+      "amount_aed": "",
+      "reason": "",
+      "record_id": "LEAD-003",
+      "source": "crm",
+      "source_row": 4,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "",
+      "reason": "",
+      "record_id": "LEAD-004",
+      "source": "crm",
+      "source_row": 5,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "",
+      "reason": "",
+      "record_id": "LEAD-005",
+      "source": "crm",
+      "source_row": 6,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "",
+      "reason": "",
+      "record_id": "LEAD-006",
+      "source": "crm",
+      "source_row": 7,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "",
+      "reason": "lead_id has conflicting campaign attribution",
+      "record_id": "LEAD-002",
+      "source": "crm",
+      "source_row": 8,
+      "status": "conflict"
+    },
+    {
+      "amount_aed": "",
+      "reason": "lead_id and campaign_id are required",
+      "record_id": "row-9",
       "source": "crm",
       "source_row": 9,
-      "record_id": "row-9",
-      "severity": "rejected",
-      "reason": "lead_id and campaign_id are required"
+      "status": "rejected"
     },
     {
+      "amount_aed": "16000.00",
+      "reason": "",
+      "record_id": "TX-001",
       "source": "revenue",
-      "source_row": 8,
+      "source_row": 2,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "9000.00",
+      "reason": "lead_id has conflicting CRM records; revenue cannot be attributed",
+      "record_id": "TX-002",
+      "source": "revenue",
+      "source_row": 3,
+      "status": "accepted-unattributed"
+    },
+    {
+      "amount_aed": "12500.00",
+      "reason": "",
       "record_id": "TX-003",
-      "severity": "rejected",
-      "reason": "duplicate transaction_id"
-    },
-    {
       "source": "revenue",
-      "source_row": 9,
-      "record_id": "TX-007",
-      "severity": "rejected",
-      "reason": "value_aed must be a non-negative finite number"
+      "source_row": 4,
+      "status": "accepted"
     },
     {
+      "amount_aed": "3500.00",
+      "reason": "",
+      "record_id": "TX-004",
+      "source": "revenue",
+      "source_row": 5,
+      "status": "accepted"
+    },
+    {
+      "amount_aed": "7000.00",
+      "reason": "CRM campaign_id has no accepted advertising record",
+      "record_id": "TX-005",
       "source": "revenue",
       "source_row": 6,
-      "record_id": "TX-005",
-      "severity": "uncertain",
-      "reason": "CRM campaign_id has no accepted advertising record"
+      "status": "accepted-unattributed"
     },
     {
+      "amount_aed": "6000.00",
+      "reason": "lead_id has no accepted CRM record; revenue cannot be attributed",
+      "record_id": "TX-006",
       "source": "revenue",
       "source_row": 7,
-      "record_id": "TX-006",
-      "severity": "uncertain",
-      "reason": "lead_id has no accepted CRM record; revenue cannot be attributed"
+      "status": "accepted-unattributed"
     },
     {
+      "amount_aed": "12500.00",
+      "reason": "duplicate transaction_id",
+      "record_id": "TX-003",
+      "source": "revenue",
+      "source_row": 8,
+      "status": "duplicate"
+    },
+    {
+      "amount_aed": "",
+      "reason": "value_aed must be a plain non-negative decimal such as 1000 or 1000.50",
+      "record_id": "TX-007",
+      "source": "revenue",
+      "source_row": 9,
+      "status": "rejected"
+    },
+    {
+      "amount_aed": "2500.00",
+      "reason": "revenue date precedes lead creation date",
+      "record_id": "TX-008",
       "source": "revenue",
       "source_row": 10,
-      "record_id": "TX-008",
-      "severity": "rejected",
-      "reason": "revenue date precedes lead creation date"
+      "status": "accepted-unattributed"
     }
   ],
-  "recommendation": {
-    "action": "request-more-evidence",
-    "decision": "Do not reallocate budget from this evidence set.",
-    "reason": "Revenue attribution coverage is below 80%.",
-    "evidence_grade": "unsupported",
-    "human_approval_required": true
-  },
+  "engine_version": "0.3.1",
   "human_approval": {
-    "required": true,
-    "approver_role": "accountable budget owner",
-    "status": "not approved",
     "allowed_values": [
       "approve",
       "reject",
       "request-more-evidence"
-    ]
+    ],
+    "approver_role": "accountable budget owner",
+    "required": true,
+    "status": "not approved"
   },
   "narrative": {
-    "status": "disabled",
+    "content": "",
     "reason": "authoritative deterministic report generated; optional AI narrative not requested",
-    "content": ""
+    "status": "disabled"
+  },
+  "recommendation": {
+    "action": "request-more-evidence",
+    "decision": "Do not reallocate budget from this evidence set alone.",
+    "evidence_grade": "unsupported",
+    "findings": [
+      "Attribution coverage is 56.6% [EV-COVER-001], below the rule set's reporting threshold of 80%.",
+      "AED 24500.00 of accepted revenue could not be assigned to a channel [EV-UNMATCH-001].",
+      "AED 9000.00 of that revenue belongs to leads with contradictory CRM records [EV-CONFLICT-001].",
+      "3 rejected, 2 duplicate and 2 conflicting source rows are excluded from every figure; each is listed in row_dispositions.csv.",
+      "AED 3500.00 of attributed revenue arrived more than 30 days after lead creation [EV-WINEXCL-030], so channel figures change with the attribution window."
+    ],
+    "human_approval_required": true,
+    "questions": [
+      "Which campaign is correct for each lead with contradictory CRM records?",
+      "Can the source systems correct or confirm the rejected, duplicate and conflicting rows?",
+      "Can the CRM export include the leads referenced by unattributed transactions?",
+      "Can the advertising export include every campaign referenced by CRM leads?",
+      "Why are some transactions dated before their lead was created?",
+      "What comparison or controlled test would the budget owner accept as evidence that changing channel spend changes revenue?"
+    ],
+    "reason": "Attribution coverage is below the rule set's reporting threshold. Some source rows were rejected, duplicated or in conflict. Channel figures are attribution-based and do not show that spend caused revenue."
+  },
+  "rejected_records": [
+    {
+      "reason": "exact duplicate advertising row",
+      "record_id": "CMP-SOCIAL-01",
+      "severity": "rejected",
+      "source": "ads",
+      "source_row": 7,
+      "status": "duplicate"
+    },
+    {
+      "reason": "spend_aed must be a plain non-negative decimal such as 1000 or 1000.50",
+      "record_id": "CMP-BROKEN-01",
+      "severity": "rejected",
+      "source": "ads",
+      "source_row": 8,
+      "status": "rejected"
+    },
+    {
+      "reason": "lead_id has conflicting campaign attribution",
+      "record_id": "LEAD-002",
+      "severity": "uncertain",
+      "source": "crm",
+      "source_row": 3,
+      "status": "conflict"
+    },
+    {
+      "reason": "lead_id has conflicting campaign attribution",
+      "record_id": "LEAD-002",
+      "severity": "uncertain",
+      "source": "crm",
+      "source_row": 8,
+      "status": "conflict"
+    },
+    {
+      "reason": "lead_id and campaign_id are required",
+      "record_id": "row-9",
+      "severity": "rejected",
+      "source": "crm",
+      "source_row": 9,
+      "status": "rejected"
+    },
+    {
+      "reason": "lead_id has conflicting CRM records; revenue cannot be attributed",
+      "record_id": "TX-002",
+      "severity": "uncertain",
+      "source": "revenue",
+      "source_row": 3,
+      "status": "accepted-unattributed"
+    },
+    {
+      "reason": "CRM campaign_id has no accepted advertising record",
+      "record_id": "TX-005",
+      "severity": "uncertain",
+      "source": "revenue",
+      "source_row": 6,
+      "status": "accepted-unattributed"
+    },
+    {
+      "reason": "lead_id has no accepted CRM record; revenue cannot be attributed",
+      "record_id": "TX-006",
+      "severity": "uncertain",
+      "source": "revenue",
+      "source_row": 7,
+      "status": "accepted-unattributed"
+    },
+    {
+      "reason": "duplicate transaction_id",
+      "record_id": "TX-003",
+      "severity": "rejected",
+      "source": "revenue",
+      "source_row": 8,
+      "status": "duplicate"
+    },
+    {
+      "reason": "value_aed must be a plain non-negative decimal such as 1000 or 1000.50",
+      "record_id": "TX-007",
+      "severity": "rejected",
+      "source": "revenue",
+      "source_row": 9,
+      "status": "rejected"
+    },
+    {
+      "reason": "revenue date precedes lead creation date",
+      "record_id": "TX-008",
+      "severity": "uncertain",
+      "source": "revenue",
+      "source_row": 10,
+      "status": "accepted-unattributed"
+    }
+  ],
+  "ruleset": {
+    "attribution_windows_days": [
+      30,
+      60,
+      90
+    ],
+    "coverage_threshold_basis": "planning choice used only to flag weak attribution coverage; not a validated decision threshold",
+    "coverage_threshold_percent": "80",
+    "fingerprint": "43eaa08db1d8937df34d254524b5e783ad4c56a487777a4bee054748728b38dc",
+    "id": "pas95-revenue-evidence-rules",
+    "version": "1"
+  },
+  "run_id": "5b7c11ad50709cf6",
+  "sensitivity": [
+    {
+      "attributed_revenue_aed": "28500.00",
+      "attribution_window_days": 30,
+      "evidence_ids": {
+        "attributed": "EV-WINATTR-030",
+        "excluded": "EV-WINEXCL-030"
+      },
+      "excluded_delayed_revenue_aed": "3500.00"
+    },
+    {
+      "attributed_revenue_aed": "32000.00",
+      "attribution_window_days": 60,
+      "evidence_ids": {
+        "attributed": "EV-WINATTR-060",
+        "excluded": "EV-WINEXCL-060"
+      },
+      "excluded_delayed_revenue_aed": "0.00"
+    },
+    {
+      "attributed_revenue_aed": "32000.00",
+      "attribution_window_days": 90,
+      "evidence_ids": {
+        "attributed": "EV-WINATTR-090",
+        "excluded": "EV-WINEXCL-090"
+      },
+      "excluded_delayed_revenue_aed": "0.00"
+    }
+  ],
+  "source_fingerprints": {
+    "ads": "3cab521ad2bd75e47336665ee4493d80bf49e544bee663007d4b82dd6e20e4d5",
+    "crm": "9fd8cc4e416aff5c44f9bd86879f0b3dd8ce489873d7193f28ab8c81d710a742",
+    "revenue": "a277bcfd8d641913bd1854328358a02e7baf7b5ab631d0ae61e90a19f3c8f76e"
+  },
+  "summary": {
+    "accepted_revenue_aed": "56500.00",
+    "accepted_rows": {
+      "ads": 5,
+      "crm": 5,
+      "revenue": 7
+    },
+    "accepted_spend_aed": "15000.00",
+    "attributed_revenue_aed": "32000.00",
+    "attribution_coverage_percent": "56.6",
+    "conflicting_lead_revenue_aed": "9000.00",
+    "rejected_or_uncertain_rows": 11,
+    "row_status_counts": {
+      "ads": {
+        "accepted": 5,
+        "accepted-unattributed": 0,
+        "conflict": 0,
+        "duplicate": 1,
+        "input": 7,
+        "rejected": 1
+      },
+      "crm": {
+        "accepted": 5,
+        "accepted-unattributed": 0,
+        "conflict": 2,
+        "duplicate": 0,
+        "input": 8,
+        "rejected": 1
+      },
+      "revenue": {
+        "accepted": 3,
+        "accepted-unattributed": 4,
+        "conflict": 0,
+        "duplicate": 1,
+        "input": 9,
+        "rejected": 1
+      }
+    },
+    "unattributed_or_invalid_revenue_aed": "24500.00"
   }
 }
