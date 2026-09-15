@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections import Counter, defaultdict
@@ -137,20 +138,33 @@ def _money(value: Decimal) -> str:
     return str(value.quantize(MONEY, rounding=ROUND_HALF_UP))
 
 
-def _parse_money(value: str, field: str) -> Decimal:
-    try:
-        parsed = Decimal(value.strip())
-    except (InvalidOperation, AttributeError) as exc:
-        raise ValueError(f"{field} is not a number") from exc
-    if not parsed.is_finite() or parsed < 0:
-        raise ValueError(f"{field} must be a non-negative finite number")
-    return parsed.quantize(MONEY, rounding=ROUND_HALF_UP)
+PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
-def _parse_date(value: str, field: str) -> date:
+def _parse_money(value: str | None, field: str) -> Decimal:
+    """A plain non-negative decimal such as 1000 or 1000.50, rounded half-up to fils.
+
+    Exponents (1e3), signs, thousands separators, underscores, bare points and
+    non-ASCII digits are refused: each is a spelling two readers could take
+    differently, and silently choosing one would put a guess into the books.
+    """
+    text = value.strip() if isinstance(value, str) else ""
+    if not PLAIN_DECIMAL.fullmatch(text):
+        raise ValueError(f"{field} must be a plain non-negative decimal such as 1000 or 1000.50")
     try:
-        return date.fromisoformat(value.strip())
-    except (ValueError, AttributeError) as exc:
+        return Decimal(text).quantize(MONEY, rounding=ROUND_HALF_UP)
+    except InvalidOperation as exc:
+        raise ValueError(f"{field} is too large to represent exactly") from exc
+
+
+def _parse_date(value: str | None, field: str) -> date:
+    text = value.strip() if isinstance(value, str) else ""
+    try:
+        if not ISO_DATE.fullmatch(text):
+            raise ValueError(text)
+        return date.fromisoformat(text)
+    except ValueError as exc:
         raise ValueError(f"{field} must be YYYY-MM-DD") from exc
 
 
@@ -164,16 +178,42 @@ def _fingerprint(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _read_csv(path: Path, required: set[str]) -> list[tuple[int, dict[str, str]]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        actual = set(reader.fieldnames or [])
-        missing = required - actual
-        if missing:
-            raise InputContractError(
-                f"{path.name} is missing required columns: {', '.join(sorted(missing))}"
-            )
-        return [(row_number, dict(row)) for row_number, row in enumerate(reader, start=2)]
+def _read_csv(path: Path, required: set[str]) -> list[tuple[int, dict[str, Any]]]:
+    """Data rows paired with the physical line on which each record starts.
+
+    Lines count the header as line 1 and include blank lines and the extra lines
+    of quoted multi-line fields, so a reference such as crm:14 is the line a
+    person opening the file would look at. Counting records instead drifts as
+    soon as an export contains a blank line or a multi-line note.
+    """
+    fieldnames: list[str] | None = None
+    rows: list[tuple[int, dict[str, Any]]] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            previous_line = 0
+            for record in reader:
+                start_line = previous_line + 1
+                previous_line = reader.line_num
+                if not record:
+                    continue
+                if fieldnames is None:
+                    fieldnames = record
+                    continue
+                row: dict[Any, Any] = dict(zip(fieldnames, record))
+                if len(record) > len(fieldnames):
+                    row[None] = record[len(fieldnames):]
+                rows.append((start_line, row))
+    except UnicodeDecodeError as exc:
+        raise InputContractError(f"{path.name} is not UTF-8 text") from exc
+    except csv.Error as exc:
+        raise InputContractError(f"{path.name} is not a readable CSV ({exc})") from exc
+    missing = required - set(fieldnames or [])
+    if missing:
+        raise InputContractError(
+            f"{path.name} is missing required columns: {', '.join(sorted(missing))}"
+        )
+    return rows
 
 
 def _claim(

@@ -33,6 +33,12 @@ ADS, CRM, REVENUE = DATA / "ads.csv", DATA / "crm.csv", DATA / "revenue.csv"
 EXCLUDED = {REJECTED, DUPLICATE, CONFLICT}
 
 
+def physical_record_lines(path: Path) -> list[int]:
+    """Line numbers of data records, for test files without quoted multi-line fields."""
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    return [number for number, line in enumerate(lines, start=1) if number > 1 and line != ""]
+
+
 def data_row_count(path: Path) -> int:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return sum(1 for _ in csv.DictReader(handle))
@@ -50,8 +56,9 @@ class DispositionTests(unittest.TestCase):
         for source, path in inputs.items():
             with self.subTest(source=source):
                 rows = [row.source_row for row in report.dispositions if row.source == source]
-                expected = list(range(2, data_row_count(path) + 2))
-                self.assertEqual(sorted(rows), expected, "each input row needs exactly one status")
+                # Physical lines, not consecutive record numbers: blank lines count.
+                expected = physical_record_lines(path)
+                self.assertEqual(sorted(rows), expected, "each input record needs exactly one status at its own line")
                 counts = report.summary["row_status_counts"][source]
                 self.assertEqual(counts["input"], len(expected))
                 self.assertEqual(

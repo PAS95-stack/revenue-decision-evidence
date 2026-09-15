@@ -27,16 +27,18 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import re
 import sys
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
 CENT = Decimal("0.01")
-PLAIN_DECIMAL = re.compile(r"\d+(?:\.\d+)?")
-ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+DOWNSTREAM_CHECKS = ("claim_values", "claim_lineage", "summary", "channels_and_sensitivity", "executive_brief")
 CITATION = re.compile(r"\[(EV-[A-Z]+-\d{3})\]")
 SOURCES = ("ads", "crm", "revenue")
 REQUIRED = {
@@ -72,7 +74,10 @@ def _text(row: dict, field: str) -> str:
 def _amount(text: str) -> Decimal | None:
     if not PLAIN_DECIMAL.fullmatch(text):
         return None
-    return Decimal(text).quantize(CENT, rounding=ROUND_HALF_UP)
+    try:
+        return Decimal(text).quantize(CENT, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
 
 
 def _day(text: str) -> date | None:
@@ -94,17 +99,72 @@ def _limited(items) -> str:
     return shown + (f" and {len(items) - MAX_DETAILS} more" if len(items) > MAX_DETAILS else "")
 
 
+def _record_start_lines(text: str) -> list[int]:
+    """Physical start line of every non-blank CSV record, found without the csv module.
+
+    A small quote-aware scanner: newlines inside a quoted field continue the
+    record, "\\r\\n", "\\r" and "\\n" each end one physical line, and an empty line
+    is not a record. The engine derives the same numbers from the csv module's
+    reader position; two methods agreeing is what makes a reference trustworthy.
+    """
+    starts: list[int] = []
+    line = 1
+    record_line = 1
+    empty = True
+    state = "field_start"
+    index = 0
+    while index < len(text):
+        char = text[index]
+        crlf = text.startswith("\r\n", index)
+        if char in "\r\n" and state != "quoted":
+            if not empty:
+                starts.append(record_line)
+            index += 2 if crlf else 1
+            line += 1
+            record_line, empty, state = line, True, "field_start"
+            continue
+        empty = False
+        if state == "field_start":
+            state = "quoted" if char == '"' else "field_start" if char == "," else "unquoted"
+        elif state == "unquoted":
+            if char == ",":
+                state = "field_start"
+        elif state == "quoted":
+            if char == '"':
+                state = "closing_quote"
+            elif char in "\r\n":
+                line += 1
+                if crlf:
+                    index += 1
+        elif state == "closing_quote":
+            state = "quoted" if char == '"' else "field_start" if char == "," else "unquoted"
+        index += 1
+    if not empty:
+        starts.append(record_line)
+    return starts
+
+
 def _read_rows(path, required) -> list[tuple[int, dict]]:
     name = Path(path).name
     try:
-        with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            missing = set(required) - set(reader.fieldnames or [])
-            if missing:
-                raise ReconstructionError(f"{name} is missing required columns: {', '.join(sorted(missing))}")
-            return [(number, dict(row)) for number, row in enumerate(reader, start=2)]
+        text = Path(path).read_bytes().decode("utf-8-sig")
     except OSError as exc:
         raise ReconstructionError(f"cannot read {name} ({type(exc).__name__})") from exc
+    except UnicodeDecodeError as exc:
+        raise ReconstructionError(f"{name} is not UTF-8 text") from exc
+    try:
+        reader = csv.DictReader(io.StringIO(text, newline=""))
+        fieldnames = reader.fieldnames
+        rows = [dict(row) for row in reader]
+    except csv.Error as exc:
+        raise ReconstructionError(f"{name} is not a readable CSV ({exc})") from exc
+    missing = set(required) - set(fieldnames or [])
+    if missing:
+        raise ReconstructionError(f"{name} is missing required columns: {', '.join(sorted(missing))}")
+    starts = _record_start_lines(text)
+    if len(starts) != len(rows) + 1:
+        raise ReconstructionError(f"cannot align the records of {name} to physical lines")
+    return list(zip(starts[1:], rows))
 
 
 def _read_csv_output(path: Path) -> list[dict]:
@@ -482,6 +542,23 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
                 )
     except ReconstructionError as exc:
         failures.append(f"inputs: {exc}")
+
+    # One wrong row status changes every figure built on it. List the row-level
+    # disagreements in full and summarise what follows from them, so the cause is
+    # not buried under dozens of consequences.
+    if any(failure.startswith("row_dispositions: status disagrees") for failure in failures):
+        collapsed: dict[str, int] = {}
+        kept = []
+        for failure in failures:
+            check = failure.split(":", 1)[0]
+            if check in DOWNSTREAM_CHECKS:
+                collapsed[check] = collapsed.get(check, 0) + 1
+            else:
+                kept.append(failure)
+        failures = kept + [
+            f"{check}: {count} discrepancies follow from the row status disagreements above"
+            for check, count in collapsed.items()
+        ]
     return list(CHECKS), failures
 
 
