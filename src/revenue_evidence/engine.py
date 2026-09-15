@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -12,9 +13,42 @@ from typing import Any, Iterable
 
 MONEY = Decimal("0.01")
 
+# Every input row receives exactly one status. Only the two "accepted" statuses
+# may contribute to a total; the others are visible but excluded.
+ACCEPTED = "accepted"
+ACCEPTED_UNATTRIBUTED = "accepted-unattributed"
+REJECTED = "rejected"
+DUPLICATE = "duplicate"
+CONFLICT = "conflict"
+STATUSES = (ACCEPTED, ACCEPTED_UNATTRIBUTED, REJECTED, DUPLICATE, CONFLICT)
+INCLUDED_STATUSES = frozenset({ACCEPTED, ACCEPTED_UNATTRIBUTED})
+SEVERITY_BY_STATUS = {
+    REJECTED: "rejected",
+    DUPLICATE: "rejected",
+    CONFLICT: "uncertain",
+    ACCEPTED_UNATTRIBUTED: "uncertain",
+}
+SOURCE_ORDER = {"ads": 0, "crm": 1, "revenue": 2}
+
+# How a source row supports a claim. Summands add up to the claim's value;
+# numerator and denominator rows form a ratio; join rows are linkage evidence
+# (such as the CRM lead connecting revenue to a campaign) and carry no amount.
+LINEAGE_ROLES = ("summand", "numerator", "denominator", "join")
+CONTRIBUTING_ROLES = frozenset({"summand", "numerator", "denominator"})
+
 
 class InputContractError(ValueError):
     """Raised when an input file cannot satisfy the required schema."""
+
+
+@dataclass(frozen=True)
+class RowDisposition:
+    source: str
+    source_row: int
+    record_id: str
+    status: str
+    reason: str
+    amount_aed: str
 
 
 @dataclass(frozen=True)
@@ -24,6 +58,7 @@ class RejectedRecord:
     record_id: str
     severity: str
     reason: str
+    status: str
 
 
 @dataclass(frozen=True)
@@ -36,6 +71,7 @@ class Claim:
     explanation: str
     source_refs: list[str]
     assumptions: list[str]
+    lineage: list[dict[str, str]]
 
 
 @dataclass
@@ -48,6 +84,7 @@ class EvidenceReport:
     sensitivity: list[dict[str, Any]]
     claims: list[Claim]
     rejected_records: list[RejectedRecord]
+    dispositions: list[RowDisposition]
     recommendation: dict[str, Any]
     human_approval: dict[str, Any]
     narrative: dict[str, Any]
@@ -78,6 +115,12 @@ def _parse_date(value: str, field: str) -> date:
         raise ValueError(f"{field} must be YYYY-MM-DD") from exc
 
 
+def _text(row: dict[str, Any], field: str) -> str:
+    """A field's trimmed text; a short row yields an empty value, never a crash."""
+    value = row.get(field)
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _fingerprint(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -94,6 +137,83 @@ def _read_csv(path: Path, required: set[str]) -> list[tuple[int, dict[str, str]]
         return [(row_number, dict(row)) for row_number, row in enumerate(reader, start=2)]
 
 
+def _claim(
+    evidence_id: str,
+    metric: str,
+    value: str,
+    unit: str,
+    grade: str,
+    explanation: str,
+    roles: dict[str, list[str]],
+    assumptions: Iterable[str] = (),
+) -> Claim:
+    unknown = set(roles) - set(LINEAGE_ROLES)
+    if unknown:
+        raise ValueError(f"unknown lineage roles: {sorted(unknown)}")
+    lineage = [
+        {"role": role, "source_ref": ref}
+        for role in LINEAGE_ROLES
+        for ref in dict.fromkeys(roles.get(role, []))
+    ]
+    source_refs = list(dict.fromkeys(entry["source_ref"] for entry in lineage))
+    return Claim(
+        evidence_id, metric, value, unit, grade, explanation, source_refs, list(assumptions), lineage
+    )
+
+
+def _dispose(
+    dispositions: dict[str, RowDisposition],
+    source: str,
+    source_row: int,
+    record_id: str,
+    status: str,
+    reason: str = "",
+    amount: Decimal | None = None,
+) -> None:
+    dispositions[f"{source}:{source_row}"] = RowDisposition(
+        source, source_row, record_id, status, reason, "" if amount is None else _money(amount)
+    )
+
+
+def _resolve_identity(
+    rows: list[dict[str, Any]],
+    key: str,
+    signature,
+    dispositions: dict[str, RowDisposition],
+    source: str,
+    duplicate_reason: str,
+    conflict_reason,
+    amount_field: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    """Resolve rows sharing an identifier without depending on file order.
+
+    Identical rows are one record: the earliest is kept and the rest are
+    duplicates. Rows that share an identifier but disagree are all conflicts —
+    choosing one would let the export's row order decide the evidence.
+    """
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[row[key]].append(row)
+    kept: list[dict[str, Any]] = []
+    conflicts: dict[str, list[str]] = {}
+    for identifier, members in groups.items():
+        members.sort(key=lambda row: row["source_row"])
+        amount = (lambda row: row[amount_field]) if amount_field else (lambda row: None)
+        if len({signature(row) for row in members}) > 1:
+            reason = conflict_reason(members)
+            conflicts[identifier] = [row["source_ref"] for row in members]
+            for row in members:
+                _dispose(dispositions, source, row["source_row"], identifier, CONFLICT, reason, amount(row))
+            continue
+        first, *repeats = members
+        kept.append(first)
+        _dispose(dispositions, source, first["source_row"], identifier, ACCEPTED, "", amount(first))
+        for row in repeats:
+            _dispose(dispositions, source, row["source_row"], identifier, DUPLICATE, duplicate_reason, amount(row))
+    kept.sort(key=lambda row: row["source_row"])
+    return kept, conflicts
+
+
 class EvidenceEngine:
     ADS_FIELDS = {"date", "campaign_id", "channel", "spend_aed"}
     CRM_FIELDS = {"lead_id", "campaign_id", "created_at", "status"}
@@ -106,12 +226,14 @@ class EvidenceEngine:
         revenue_path: str | Path,
     ) -> EvidenceReport:
         ads_path, crm_path, revenue_path = map(Path, (ads_path, crm_path, revenue_path))
-        rejected: list[RejectedRecord] = []
-        ads = self._validate_ads(_read_csv(ads_path, self.ADS_FIELDS), rejected)
-        crm = self._validate_crm(_read_csv(crm_path, self.CRM_FIELDS), rejected)
-        revenue = self._validate_revenue(
-            _read_csv(revenue_path, self.REVENUE_FIELDS), rejected
-        )
+        ads_rows = _read_csv(ads_path, self.ADS_FIELDS)
+        crm_rows = _read_csv(crm_path, self.CRM_FIELDS)
+        revenue_rows = _read_csv(revenue_path, self.REVENUE_FIELDS)
+
+        dispositions: dict[str, RowDisposition] = {}
+        ads, conflicted_campaigns = self._validate_ads(ads_rows, dispositions)
+        crm, conflicting_leads = self._validate_crm(crm_rows, dispositions)
+        revenue = self._validate_revenue(revenue_rows, dispositions)
 
         spend_total = sum((row["spend"] for row in ads), Decimal("0"))
         revenue_total = sum((row["value"] for row in revenue), Decimal("0"))
@@ -125,45 +247,29 @@ class EvidenceEngine:
             ) + row["spend"]
 
         attributed: list[dict[str, Any]] = []
-        orphan_revenue = Decimal("0")
+        unattributed: list[dict[str, Any]] = []
+        conflicted_revenue: list[dict[str, Any]] = []
         for row in revenue:
             lead = leads_by_id.get(row["lead_id"])
-            if not lead:
-                orphan_revenue += row["value"]
-                rejected.append(
-                    RejectedRecord(
-                        "revenue",
-                        row["source_row"],
-                        row["transaction_id"],
-                        "uncertain",
-                        "lead_id has no accepted CRM record; revenue cannot be attributed",
-                    )
-                )
-                continue
-            channel = campaign_to_channel.get(lead["campaign_id"])
-            if not channel:
-                orphan_revenue += row["value"]
-                rejected.append(
-                    RejectedRecord(
-                        "revenue",
-                        row["source_row"],
-                        row["transaction_id"],
-                        "uncertain",
-                        "CRM campaign_id has no accepted advertising record",
-                    )
-                )
-                continue
-            delay_days = (row["date"] - lead["created_at"]).days
-            if delay_days < 0:
-                orphan_revenue += row["value"]
-                rejected.append(
-                    RejectedRecord(
-                        "revenue",
-                        row["source_row"],
-                        row["transaction_id"],
-                        "rejected",
-                        "revenue date precedes lead creation date",
-                    )
+            channel = campaign_to_channel.get(lead["campaign_id"]) if lead else None
+            if lead is None and row["lead_id"] in conflicting_leads:
+                reason = "lead_id has conflicting CRM records; revenue cannot be attributed"
+                conflicted_revenue.append(row)
+            elif lead is None:
+                reason = "lead_id has no accepted CRM record; revenue cannot be attributed"
+            elif channel is None and lead["campaign_id"] in conflicted_campaigns:
+                reason = "CRM campaign_id maps to conflicting advertising channels"
+            elif channel is None:
+                reason = "CRM campaign_id has no accepted advertising record"
+            elif (row["date"] - lead["created_at"]).days < 0:
+                reason = "revenue date precedes lead creation date"
+            else:
+                reason = ""
+            if reason:
+                unattributed.append(row)
+                _dispose(
+                    dispositions, "revenue", row["source_row"], row["transaction_id"],
+                    ACCEPTED_UNATTRIBUTED, reason, row["value"],
                 )
                 continue
             attributed.append(
@@ -171,12 +277,14 @@ class EvidenceEngine:
                     **row,
                     "campaign_id": lead["campaign_id"],
                     "channel": channel,
-                    "delay_days": delay_days,
+                    "delay_days": (row["date"] - lead["created_at"]).days,
                     "crm_ref": lead["source_ref"],
                 }
             )
 
         attributed_total = sum((row["value"] for row in attributed), Decimal("0"))
+        unattributed_total = sum((row["value"] for row in unattributed), Decimal("0"))
+        conflicted_total = sum((row["value"] for row in conflicted_revenue), Decimal("0"))
         coverage = Decimal("0") if revenue_total == 0 else attributed_total / revenue_total
 
         channel_rows: list[dict[str, Any]] = []
@@ -211,72 +319,98 @@ class EvidenceEngine:
                 }
             )
 
-        accepted_refs = {
-            "ads": [row["source_ref"] for row in ads],
-            "crm": [row["source_ref"] for row in crm],
-            "revenue": [row["source_ref"] for row in revenue],
-        }
+        ad_refs = [row["source_ref"] for row in ads]
+        revenue_refs = [row["source_ref"] for row in revenue]
+        attributed_refs = [row["source_ref"] for row in attributed]
+        attribution_joins = [row["crm_ref"] for row in attributed]
         claims = [
-            Claim(
+            _claim(
                 "EV-SPEND-001",
                 "accepted_ad_spend",
                 _money(spend_total),
                 "AED",
                 "reconciled",
-                "Sum of accepted advertising rows after validation and duplicate removal.",
-                accepted_refs["ads"],
-                [],
+                "Sum of accepted advertising rows; invalid, duplicate and conflicting rows are excluded.",
+                {"summand": ad_refs},
             ),
-            Claim(
+            _claim(
                 "EV-REV-001",
                 "accepted_revenue",
                 _money(revenue_total),
                 "AED",
                 "reconciled",
-                "Sum of accepted revenue rows after validation and duplicate removal.",
-                accepted_refs["revenue"],
-                [],
+                "Sum of accepted revenue rows, attributed or not; invalid, duplicate and conflicting rows are excluded.",
+                {"summand": revenue_refs},
             ),
-            Claim(
+            _claim(
                 "EV-ATTR-001",
                 "attributed_revenue",
                 _money(attributed_total),
                 "AED",
                 "assumption-dependent",
                 "Revenue connected deterministically through revenue.lead_id to CRM campaign_id and advertising channel.",
-                [
-                    ref
-                    for row in attributed
-                    for ref in (row["source_ref"], row["crm_ref"])
-                ],
+                {"summand": attributed_refs, "join": attribution_joins},
                 ["CRM campaign is treated as the governing source attribution."],
             ),
-            Claim(
+            _claim(
                 "EV-COVER-001",
                 "revenue_attribution_coverage",
                 str((coverage * 100).quantize(Decimal("0.1"))),
                 "percent",
                 "reconciled",
-                "Share of accepted revenue connected to an accepted CRM lead and advertising campaign.",
-                accepted_refs["crm"] + accepted_refs["revenue"],
-                [],
+                "Attributed revenue (numerator rows) as a share of accepted revenue (denominator rows).",
+                {"numerator": attributed_refs, "denominator": revenue_refs, "join": attribution_joins},
             ),
-            Claim(
+            _claim(
                 "EV-UNMATCH-001",
                 "unattributed_or_invalid_revenue",
-                _money(orphan_revenue),
+                _money(unattributed_total),
                 "AED",
                 "reconciled",
-                "Accepted revenue that could not be assigned to an advertising channel or had invalid chronology.",
-                [
-                    f"revenue:{row.source_row}"
-                    for row in rejected
-                    if row.source == "revenue" and "attribute" in row.reason
-                ]
-                or accepted_refs["revenue"],
-                [],
+                "Accepted revenue that could not be assigned to a channel: no accepted or unambiguous CRM lead, "
+                "no accepted advertising campaign, or revenue dated before lead creation.",
+                {"summand": [row["source_ref"] for row in unattributed]},
+            ),
+            _claim(
+                "EV-CONFLICT-001",
+                "revenue_with_conflicting_lead_attribution",
+                _money(conflicted_total),
+                "AED",
+                "reconciled",
+                "Accepted revenue whose CRM lead has contradictory records; excluded from attribution "
+                "instead of letting file order choose a campaign.",
+                {
+                    "summand": [row["source_ref"] for row in conflicted_revenue],
+                    "join": [
+                        ref
+                        for row in conflicted_revenue
+                        for ref in conflicting_leads[row["lead_id"]]
+                    ],
+                },
             ),
         ]
+
+        ordered = self._complete_dispositions(
+            dispositions, {"ads": ads_rows, "crm": crm_rows, "revenue": revenue_rows}
+        )
+        rejected = [
+            RejectedRecord(
+                row.source, row.source_row, row.record_id,
+                SEVERITY_BY_STATUS[row.status], row.reason, row.status,
+            )
+            for row in ordered
+            if row.status != ACCEPTED
+        ]
+        status_counts = {
+            source: {
+                "input": len(rows),
+                **{
+                    status: sum(1 for row in ordered if row.source == source and row.status == status)
+                    for status in STATUSES
+                },
+            }
+            for source, rows in (("ads", ads_rows), ("crm", crm_rows), ("revenue", revenue_rows))
+        }
 
         recommendation = self._recommend(channel_rows, coverage, rejected)
         fingerprints = {
@@ -295,7 +429,8 @@ class EvidenceEngine:
                 "accepted_spend_aed": _money(spend_total),
                 "accepted_revenue_aed": _money(revenue_total),
                 "attributed_revenue_aed": _money(attributed_total),
-                "unattributed_or_invalid_revenue_aed": _money(orphan_revenue),
+                "unattributed_or_invalid_revenue_aed": _money(unattributed_total),
+                "conflicting_lead_revenue_aed": _money(conflicted_total),
                 "attribution_coverage_percent": str(
                     (coverage * 100).quantize(Decimal("0.1"))
                 ),
@@ -304,12 +439,14 @@ class EvidenceEngine:
                     "crm": len(crm),
                     "revenue": len(revenue),
                 },
+                "row_status_counts": status_counts,
                 "rejected_or_uncertain_rows": len(rejected),
             },
             channels=channel_rows,
             sensitivity=sensitivity,
             claims=claims,
             rejected_records=rejected,
+            dispositions=ordered,
             recommendation=recommendation,
             human_approval={
                 "required": True,
@@ -325,107 +462,150 @@ class EvidenceEngine:
         )
 
     @staticmethod
+    def _complete_dispositions(
+        dispositions: dict[str, RowDisposition],
+        inputs: dict[str, list[tuple[int, dict[str, str]]]],
+    ) -> list[RowDisposition]:
+        """Every input row must have exactly one status; a gap is an engine defect."""
+        expected = {f"{source}:{row_number}" for source, rows in inputs.items() for row_number, _ in rows}
+        missing = expected - set(dispositions)
+        unexpected = set(dispositions) - expected
+        if missing or unexpected:
+            raise RuntimeError(
+                f"row disposition invariant violated; missing={sorted(missing)} unexpected={sorted(unexpected)}"
+            )
+        return sorted(
+            dispositions.values(), key=lambda row: (SOURCE_ORDER[row.source], row.source_row)
+        )
+
+    @staticmethod
     def _validate_ads(
-        rows: Iterable[tuple[int, dict[str, str]]], rejected: list[RejectedRecord]
-    ) -> list[dict[str, Any]]:
-        accepted, seen = [], set()
-        campaign_channel: dict[str, str] = {}
+        rows: Iterable[tuple[int, dict[str, str]]], dispositions: dict[str, RowDisposition]
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        valid: list[dict[str, Any]] = []
         for source_row, row in rows:
-            record_id = row.get("campaign_id", "").strip() or f"row-{source_row}"
+            campaign_id = _text(row, "campaign_id")
+            channel = _text(row, "channel")
+            record_id = campaign_id or f"row-{source_row}"
             try:
                 parsed = {
-                    "date": _parse_date(row["date"], "date"),
-                    "campaign_id": row["campaign_id"].strip(),
-                    "channel": row["channel"].strip(),
-                    "spend": _parse_money(row["spend_aed"], "spend_aed"),
+                    "date": _parse_date(row.get("date"), "date"),
+                    "campaign_id": campaign_id,
+                    "channel": channel,
+                    "spend": _parse_money(row.get("spend_aed"), "spend_aed"),
                     "source_row": source_row,
                     "source_ref": f"ads:{source_row}",
                 }
-                if not parsed["campaign_id"] or not parsed["channel"]:
+                if not campaign_id or not channel:
                     raise ValueError("campaign_id and channel are required")
-                signature = (
-                    parsed["date"], parsed["campaign_id"], parsed["channel"], parsed["spend"]
-                )
-                if signature in seen:
-                    raise ValueError("exact duplicate advertising row")
-                prior = campaign_channel.get(parsed["campaign_id"])
-                if prior and prior != parsed["channel"]:
-                    raise ValueError("campaign_id maps to conflicting channels")
-                seen.add(signature)
-                campaign_channel[parsed["campaign_id"]] = parsed["channel"]
-                accepted.append(parsed)
             except ValueError as exc:
-                rejected.append(
-                    RejectedRecord("ads", source_row, record_id, "rejected", str(exc))
+                _dispose(dispositions, "ads", source_row, record_id, REJECTED, str(exc))
+                continue
+            valid.append(parsed)
+
+        channels_by_campaign: dict[str, set[str]] = defaultdict(set)
+        for row in valid:
+            channels_by_campaign[row["campaign_id"]].add(row["channel"])
+        conflicted = {campaign for campaign, channels in channels_by_campaign.items() if len(channels) > 1}
+
+        accepted: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+        for row in valid:
+            if row["campaign_id"] in conflicted:
+                _dispose(
+                    dispositions, "ads", row["source_row"], row["campaign_id"], CONFLICT,
+                    "campaign_id maps to conflicting channels", row["spend"],
                 )
-        return accepted
+                continue
+            signature = (row["date"], row["campaign_id"], row["channel"], row["spend"])
+            if signature in seen:
+                _dispose(
+                    dispositions, "ads", row["source_row"], row["campaign_id"], DUPLICATE,
+                    "exact duplicate advertising row", row["spend"],
+                )
+                continue
+            seen.add(signature)
+            accepted.append(row)
+            _dispose(dispositions, "ads", row["source_row"], row["campaign_id"], ACCEPTED, "", row["spend"])
+        return accepted, conflicted
 
     @staticmethod
     def _validate_crm(
-        rows: Iterable[tuple[int, dict[str, str]]], rejected: list[RejectedRecord]
-    ) -> list[dict[str, Any]]:
-        accepted, seen = [], {}
+        rows: Iterable[tuple[int, dict[str, str]]], dispositions: dict[str, RowDisposition]
+    ) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+        valid: list[dict[str, Any]] = []
         for source_row, row in rows:
-            record_id = row.get("lead_id", "").strip() or f"row-{source_row}"
+            lead_id = _text(row, "lead_id")
+            campaign_id = _text(row, "campaign_id")
+            record_id = lead_id or f"row-{source_row}"
             try:
-                lead_id = row["lead_id"].strip()
-                campaign_id = row["campaign_id"].strip()
                 if not lead_id or not campaign_id:
                     raise ValueError("lead_id and campaign_id are required")
-                if lead_id in seen:
-                    prior_campaign = seen[lead_id]
-                    reason = (
-                        "duplicate lead_id"
-                        if prior_campaign == campaign_id
-                        else "lead_id has conflicting campaign attribution"
-                    )
-                    raise ValueError(reason)
                 parsed = {
                     "lead_id": lead_id,
                     "campaign_id": campaign_id,
-                    "created_at": _parse_date(row["created_at"], "created_at"),
-                    "status": row["status"].strip().lower(),
+                    "created_at": _parse_date(row.get("created_at"), "created_at"),
+                    "status": _text(row, "status").lower(),
                     "source_row": source_row,
                     "source_ref": f"crm:{source_row}",
                 }
                 if not parsed["status"]:
                     raise ValueError("status is required")
-                seen[lead_id] = campaign_id
-                accepted.append(parsed)
             except ValueError as exc:
-                rejected.append(
-                    RejectedRecord("crm", source_row, record_id, "rejected", str(exc))
-                )
-        return accepted
+                _dispose(dispositions, "crm", source_row, record_id, REJECTED, str(exc))
+                continue
+            valid.append(parsed)
+
+        def conflict_reason(members: list[dict[str, Any]]) -> str:
+            if len({row["campaign_id"] for row in members}) > 1:
+                return "lead_id has conflicting campaign attribution"
+            return "lead_id has conflicting created_at or status values"
+
+        return _resolve_identity(
+            valid,
+            key="lead_id",
+            signature=lambda row: (row["campaign_id"], row["created_at"], row["status"]),
+            dispositions=dispositions,
+            source="crm",
+            duplicate_reason="duplicate lead_id",
+            conflict_reason=conflict_reason,
+        )
 
     @staticmethod
     def _validate_revenue(
-        rows: Iterable[tuple[int, dict[str, str]]], rejected: list[RejectedRecord]
+        rows: Iterable[tuple[int, dict[str, str]]], dispositions: dict[str, RowDisposition]
     ) -> list[dict[str, Any]]:
-        accepted, seen = [], set()
+        valid: list[dict[str, Any]] = []
         for source_row, row in rows:
-            record_id = row.get("transaction_id", "").strip() or f"row-{source_row}"
+            transaction_id = _text(row, "transaction_id")
+            lead_id = _text(row, "lead_id")
+            record_id = transaction_id or f"row-{source_row}"
             try:
-                transaction_id = row["transaction_id"].strip()
-                lead_id = row["lead_id"].strip()
                 if not transaction_id or not lead_id:
                     raise ValueError("transaction_id and lead_id are required")
-                if transaction_id in seen:
-                    raise ValueError("duplicate transaction_id")
                 parsed = {
                     "transaction_id": transaction_id,
                     "lead_id": lead_id,
-                    "value": _parse_money(row["value_aed"], "value_aed"),
-                    "date": _parse_date(row["date"], "date"),
+                    "value": _parse_money(row.get("value_aed"), "value_aed"),
+                    "date": _parse_date(row.get("date"), "date"),
                     "source_row": source_row,
                     "source_ref": f"revenue:{source_row}",
                 }
-                seen.add(transaction_id)
-                accepted.append(parsed)
             except ValueError as exc:
-                rejected.append(
-                    RejectedRecord("revenue", source_row, record_id, "rejected", str(exc))
-                )
+                _dispose(dispositions, "revenue", source_row, record_id, REJECTED, str(exc))
+                continue
+            valid.append(parsed)
+
+        accepted, _ = _resolve_identity(
+            valid,
+            key="transaction_id",
+            signature=lambda row: (row["lead_id"], row["value"], row["date"]),
+            dispositions=dispositions,
+            source="revenue",
+            duplicate_reason="duplicate transaction_id",
+            conflict_reason=lambda members: "transaction_id has conflicting values",
+            amount_field="value",
+        )
         return accepted
 
     @staticmethod
@@ -474,7 +654,7 @@ def write_outputs(report: EvidenceReport, output_dir: str | Path) -> None:
 
     with (output / "rejected_records.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
-            handle, fieldnames=["source", "source_row", "record_id", "severity", "reason"]
+            handle, fieldnames=["source", "source_row", "record_id", "status", "severity", "reason"]
         )
         writer.writeheader()
         for row in report.rejected_records:
@@ -483,19 +663,38 @@ def write_outputs(report: EvidenceReport, output_dir: str | Path) -> None:
     with (output / "lineage.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["evidence_id", "metric", "grade", "source_ref"],
+            fieldnames=["evidence_id", "metric", "grade", "role", "source_ref"],
         )
         writer.writeheader()
         for claim in report.claims:
-            for source_ref in claim.source_refs:
+            for entry in claim.lineage:
                 writer.writerow(
                     {
                         "evidence_id": claim.evidence_id,
                         "metric": claim.metric,
                         "grade": claim.grade,
-                        "source_ref": source_ref,
+                        "role": entry["role"],
+                        "source_ref": entry["source_ref"],
                     }
                 )
+
+    supports: dict[str, list[str]] = defaultdict(list)
+    for claim in report.claims:
+        for entry in claim.lineage:
+            supports[entry["source_ref"]].append(f"{claim.evidence_id}:{entry['role']}")
+    with (output / "row_dispositions.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["source", "source_row", "record_id", "status", "reason", "amount_aed", "supports"],
+        )
+        writer.writeheader()
+        for row in report.dispositions:
+            writer.writerow(
+                {
+                    **asdict(row),
+                    "supports": ";".join(supports.get(f"{row.source}:{row.source_row}", [])),
+                }
+            )
 
     (output / "executive_brief.md").write_text(_brief(report), encoding="utf-8")
     (output / "report.html").write_text(_html(report), encoding="utf-8")
@@ -527,8 +726,8 @@ def _brief(report: EvidenceReport) -> str:
     )
     return f"""# Executive Evidence Brief — Synthetic Demonstration
 
-**Evidence status:** synthetic and reproducible; not a customer result, real-data deployment, reference, or paid validation.  
-**Run ID:** `{report.run_id}`  
+**Evidence status:** synthetic and reproducible; not a customer result, real-data deployment, reference, or paid validation.
+**Run ID:** `{report.run_id}`
 **Decision status:** not approved; named budget-owner approval is required.
 
 ## Decision question
@@ -542,6 +741,7 @@ What can the supplied advertising, CRM, and revenue exports defend about the nex
 - Attributed revenue: **AED {report.summary['attributed_revenue_aed']}** `[EV-ATTR-001]`
 - Attribution coverage: **{report.summary['attribution_coverage_percent']}%** `[EV-COVER-001]`
 - Unattributed or invalid revenue: **AED {report.summary['unattributed_or_invalid_revenue_aed']}** `[EV-UNMATCH-001]`
+- Revenue with conflicting lead attribution: **AED {report.summary['conflicting_lead_revenue_aed']}** `[EV-CONFLICT-001]`
 - Rejected or uncertain rows: **{report.summary['rejected_or_uncertain_rows']}**
 
 ## Channel view

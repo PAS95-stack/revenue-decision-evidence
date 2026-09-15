@@ -61,7 +61,14 @@ class EvidenceEngineTests(unittest.TestCase):
         report = self.run_report()
         self.assertEqual(report.summary["accepted_spend_aed"], "150.00")
         self.assertEqual(report.summary["attributed_revenue_aed"], "400.00")
-        self.assertTrue(all(claim.source_refs for claim in report.claims))
+        for claim in report.claims:
+            if Decimal(claim.value) == 0:
+                # A zero total adds up no rows; listing rows would break reconstruction.
+                self.assertFalse(
+                    [e for e in claim.lineage if e["role"] == "summand"], claim.evidence_id
+                )
+            else:
+                self.assertTrue(claim.source_refs, claim.evidence_id)
 
     def test_02_missing_ids_are_rejected(self):
         write_csv(
