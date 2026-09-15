@@ -3,13 +3,18 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
 from typing import Any, Iterable
+
+from .reconstruct import verify_outputs
 
 
 MONEY = Decimal("0.01")
@@ -118,9 +123,13 @@ class EvidenceReport:
     recommendation: dict[str, Any]
     human_approval: dict[str, Any]
     narrative: dict[str, Any]
+    # Where the exports were read from, so publication can re-read them for
+    # independent verification. Never serialised: paths differ between machines.
+    source_paths: dict[str, str] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        payload.pop("source_paths", None)
         return payload
 
 
@@ -574,6 +583,7 @@ class EvidenceEngine:
                 "reason": "authoritative deterministic report generated; optional AI narrative not requested",
                 "content": "",
             },
+            source_paths={"ads": str(ads_path), "crm": str(crm_path), "revenue": str(revenue_path)},
         )
 
     @staticmethod
@@ -804,9 +814,67 @@ class EvidenceEngine:
         }
 
 
-def write_outputs(report: EvidenceReport, output_dir: str | Path) -> None:
+OUTPUT_NAMES = (
+    "report.json",
+    "lineage.csv",
+    "row_dispositions.csv",
+    "rejected_records.csv",
+    "executive_brief.md",
+    "report.html",
+    "evaluation_results.json",
+)
+
+
+def clear_outputs(output_dir: str | Path) -> None:
+    """Remove files a previous run published, so a failed run cannot leave a stale brief behind."""
+    output = Path(output_dir)
+    for name in OUTPUT_NAMES:
+        (output / name).unlink(missing_ok=True)
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_outputs(report: EvidenceReport, output_dir: str | Path) -> dict[str, Any]:
+    """Publish outputs only after independent reconstruction passes.
+
+    Everything is written to a staging directory and checked by
+    reconstruct.verify_outputs, which re-derives every row status and figure from
+    the raw exports without using this module. On failure only
+    evaluation_results.json is published, listing why; no report, lineage or
+    brief is left behind. Returns the evaluation.
+    """
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    clear_outputs(output)
+    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=output))
+    try:
+        _write_files(report, staging)
+        checks, failures = verify_outputs(report.source_paths, staging)
+        evaluation: dict[str, Any] = {
+            "run_id": report.run_id,
+            "engine_version": report.engine_version,
+            "status": "FAIL" if failures else "PASS",
+            "checks": checks,
+            "failures": failures,
+            "published_outputs": {},
+        }
+        if failures:
+            _write_json(output / "evaluation_results.json", evaluation)
+            return evaluation
+        evaluation["published_outputs"] = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(staging.iterdir())
+        }
+        _write_json(staging / "evaluation_results.json", evaluation)
+        for path in sorted(staging.iterdir()):
+            os.replace(path, output / path.name)
+        return evaluation
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _write_files(report: EvidenceReport, output: Path) -> None:
     (output / "report.json").write_text(
         json.dumps(report.to_dict(), indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -857,21 +925,6 @@ def write_outputs(report: EvidenceReport, output_dir: str | Path) -> None:
 
     (output / "executive_brief.md").write_text(_brief(report), encoding="utf-8")
     (output / "report.html").write_text(_html(report), encoding="utf-8")
-    evaluation = {
-        "run_id": report.run_id,
-        "status": "PASS" if report.claims and report.human_approval["required"] else "FAIL",
-        "checks": {
-            "source_fingerprints_present": len(report.source_fingerprints) == 3,
-            "authoritative_claims_present": bool(report.claims),
-            "rejected_records_visible": True,
-            "sensitivity_present": len(report.sensitivity) == 3,
-            "human_approval_required": report.human_approval["required"],
-            "ai_not_authoritative": report.narrative["status"] != "authoritative",
-        },
-    }
-    (output / "evaluation_results.json").write_text(
-        json.dumps(evaluation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
 
 
 def _brief(report: EvidenceReport) -> str:

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
-from .engine import EvidenceEngine, write_outputs
+from .engine import EvidenceEngine, InputContractError, clear_outputs, write_outputs
 from .narrative import generate_azure_narrative
 
 
@@ -23,16 +24,26 @@ def main() -> int:
         help="Send computed evidence records only to a configured Azure OpenAI deployment",
     )
     args = parser.parse_args()
-    report = EvidenceEngine().run(args.ads, args.crm, args.revenue, as_of=args.as_of)
+    # Stale outputs go first, so no earlier brief survives a run that stops early.
+    clear_outputs(args.output)
+    try:
+        report = EvidenceEngine().run(args.ads, args.crm, args.revenue, as_of=args.as_of)
+    except InputContractError as exc:
+        print(json.dumps({"status": "FAIL", "failures": [f"inputs: {exc}"]}, indent=2), file=sys.stderr)
+        return 2
     if args.azure_narrative:
         report.narrative = generate_azure_narrative(report)
-    write_outputs(report, args.output)
-    print(
-        json.dumps(
-            {"run_id": report.run_id, "engine_version": report.engine_version, "output": args.output},
-            indent=2,
-        )
-    )
+    evaluation = write_outputs(report, args.output)
+    result = {
+        "run_id": report.run_id,
+        "engine_version": report.engine_version,
+        "status": evaluation["status"],
+        "output": args.output,
+    }
+    if evaluation["status"] != "PASS":
+        print(json.dumps({**result, "failures": evaluation["failures"]}, indent=2), file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2))
     return 0
 
 
