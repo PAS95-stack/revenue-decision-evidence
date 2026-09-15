@@ -22,7 +22,7 @@ reproduce from the raw rows. The data here is synthetic."
 
 **0:30–0:50 — Step 1: tests**
 
-Show `Ran 103 tests … OK`. Say: "These include attacks written before the fixes,
+Show `Ran 127 tests … OK`. Say: "These include attacks written before the fixes,
 200 generated datasets with injected faults, and deliberately broken copies of
 the engine that must be blocked."
 

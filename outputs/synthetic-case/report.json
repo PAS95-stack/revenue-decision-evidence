@@ -779,6 +779,7 @@
       "reason": "",
       "record_id": "CMP-SEARCH-01",
       "source": "ads",
+      "source_file": "",
       "source_row": 2,
       "status": "accepted"
     },
@@ -787,6 +788,7 @@
       "reason": "",
       "record_id": "CMP-SOCIAL-01",
       "source": "ads",
+      "source_file": "",
       "source_row": 3,
       "status": "accepted"
     },
@@ -795,6 +797,7 @@
       "reason": "",
       "record_id": "CMP-EMAIL-01",
       "source": "ads",
+      "source_file": "",
       "source_row": 4,
       "status": "accepted"
     },
@@ -803,6 +806,7 @@
       "reason": "",
       "record_id": "CMP-SEARCH-01",
       "source": "ads",
+      "source_file": "",
       "source_row": 5,
       "status": "accepted"
     },
@@ -811,6 +815,7 @@
       "reason": "",
       "record_id": "CMP-SOCIAL-01",
       "source": "ads",
+      "source_file": "",
       "source_row": 6,
       "status": "accepted"
     },
@@ -819,6 +824,7 @@
       "reason": "exact duplicate advertising row",
       "record_id": "CMP-SOCIAL-01",
       "source": "ads",
+      "source_file": "",
       "source_row": 7,
       "status": "duplicate"
     },
@@ -827,6 +833,7 @@
       "reason": "spend_aed must be a plain non-negative decimal such as 1000 or 1000.50",
       "record_id": "CMP-BROKEN-01",
       "source": "ads",
+      "source_file": "",
       "source_row": 8,
       "status": "rejected"
     },
@@ -835,6 +842,7 @@
       "reason": "",
       "record_id": "LEAD-001",
       "source": "crm",
+      "source_file": "",
       "source_row": 2,
       "status": "accepted"
     },
@@ -843,6 +851,7 @@
       "reason": "lead_id has conflicting campaign attribution",
       "record_id": "LEAD-002",
       "source": "crm",
+      "source_file": "",
       "source_row": 3,
       "status": "conflict"
     },
@@ -851,6 +860,7 @@
       "reason": "",
       "record_id": "LEAD-003",
       "source": "crm",
+      "source_file": "",
       "source_row": 4,
       "status": "accepted"
     },
@@ -859,6 +869,7 @@
       "reason": "",
       "record_id": "LEAD-004",
       "source": "crm",
+      "source_file": "",
       "source_row": 5,
       "status": "accepted"
     },
@@ -867,6 +878,7 @@
       "reason": "",
       "record_id": "LEAD-005",
       "source": "crm",
+      "source_file": "",
       "source_row": 6,
       "status": "accepted"
     },
@@ -875,6 +887,7 @@
       "reason": "",
       "record_id": "LEAD-006",
       "source": "crm",
+      "source_file": "",
       "source_row": 7,
       "status": "accepted"
     },
@@ -883,6 +896,7 @@
       "reason": "lead_id has conflicting campaign attribution",
       "record_id": "LEAD-002",
       "source": "crm",
+      "source_file": "",
       "source_row": 8,
       "status": "conflict"
     },
@@ -891,6 +905,7 @@
       "reason": "lead_id and campaign_id are required",
       "record_id": "row-9",
       "source": "crm",
+      "source_file": "",
       "source_row": 9,
       "status": "rejected"
     },
@@ -899,6 +914,7 @@
       "reason": "",
       "record_id": "TX-001",
       "source": "revenue",
+      "source_file": "",
       "source_row": 2,
       "status": "accepted"
     },
@@ -907,6 +923,7 @@
       "reason": "lead_id has conflicting CRM records; revenue cannot be attributed",
       "record_id": "TX-002",
       "source": "revenue",
+      "source_file": "",
       "source_row": 3,
       "status": "accepted-unattributed"
     },
@@ -915,6 +932,7 @@
       "reason": "",
       "record_id": "TX-003",
       "source": "revenue",
+      "source_file": "",
       "source_row": 4,
       "status": "accepted"
     },
@@ -923,6 +941,7 @@
       "reason": "",
       "record_id": "TX-004",
       "source": "revenue",
+      "source_file": "",
       "source_row": 5,
       "status": "accepted"
     },
@@ -931,6 +950,7 @@
       "reason": "CRM campaign_id has no accepted advertising record",
       "record_id": "TX-005",
       "source": "revenue",
+      "source_file": "",
       "source_row": 6,
       "status": "accepted-unattributed"
     },
@@ -939,6 +959,7 @@
       "reason": "lead_id has no accepted CRM record; revenue cannot be attributed",
       "record_id": "TX-006",
       "source": "revenue",
+      "source_file": "",
       "source_row": 7,
       "status": "accepted-unattributed"
     },
@@ -947,6 +968,7 @@
       "reason": "duplicate transaction_id",
       "record_id": "TX-003",
       "source": "revenue",
+      "source_file": "",
       "source_row": 8,
       "status": "duplicate"
     },
@@ -955,6 +977,7 @@
       "reason": "value_aed must be a plain non-negative decimal such as 1000 or 1000.50",
       "record_id": "TX-007",
       "source": "revenue",
+      "source_file": "",
       "source_row": 9,
       "status": "rejected"
     },
@@ -963,11 +986,136 @@
       "reason": "revenue date precedes lead creation date",
       "record_id": "TX-008",
       "source": "revenue",
+      "source_file": "",
       "source_row": 10,
       "status": "accepted-unattributed"
     }
   ],
-  "engine_version": "0.3.1",
+  "engagement": null,
+  "engine_version": "0.4.0",
+  "exceptions": [
+    {
+      "amount_aed": "12500.00",
+      "example_refs": [
+        "revenue:8"
+      ],
+      "reason": "duplicate transaction_id",
+      "rows": 1,
+      "rows_without_amount": 0,
+      "source": "revenue",
+      "status": "duplicate",
+      "who_can_fix": "Finance or billing owner"
+    },
+    {
+      "amount_aed": "9000.00",
+      "example_refs": [
+        "revenue:3"
+      ],
+      "reason": "lead_id has conflicting CRM records; revenue cannot be attributed",
+      "rows": 1,
+      "rows_without_amount": 0,
+      "source": "revenue",
+      "status": "accepted-unattributed",
+      "who_can_fix": "CRM owner"
+    },
+    {
+      "amount_aed": "7000.00",
+      "example_refs": [
+        "revenue:6"
+      ],
+      "reason": "CRM campaign_id has no accepted advertising record",
+      "rows": 1,
+      "rows_without_amount": 0,
+      "source": "revenue",
+      "status": "accepted-unattributed",
+      "who_can_fix": "Advertising account owner"
+    },
+    {
+      "amount_aed": "6000.00",
+      "example_refs": [
+        "revenue:7"
+      ],
+      "reason": "lead_id has no accepted CRM record; revenue cannot be attributed",
+      "rows": 1,
+      "rows_without_amount": 0,
+      "source": "revenue",
+      "status": "accepted-unattributed",
+      "who_can_fix": "CRM owner"
+    },
+    {
+      "amount_aed": "2500.00",
+      "example_refs": [
+        "revenue:10"
+      ],
+      "reason": "revenue date precedes lead creation date",
+      "rows": 1,
+      "rows_without_amount": 0,
+      "source": "revenue",
+      "status": "accepted-unattributed",
+      "who_can_fix": "CRM owner"
+    },
+    {
+      "amount_aed": "2000.00",
+      "example_refs": [
+        "ads:7"
+      ],
+      "reason": "exact duplicate advertising row",
+      "rows": 1,
+      "rows_without_amount": 0,
+      "source": "ads",
+      "status": "duplicate",
+      "who_can_fix": "Advertising account owner"
+    },
+    {
+      "amount_aed": "0.00",
+      "example_refs": [
+        "crm:3",
+        "crm:8"
+      ],
+      "reason": "lead_id has conflicting campaign attribution",
+      "rows": 2,
+      "rows_without_amount": 2,
+      "source": "crm",
+      "status": "conflict",
+      "who_can_fix": "CRM owner"
+    },
+    {
+      "amount_aed": "0.00",
+      "example_refs": [
+        "ads:8"
+      ],
+      "reason": "spend_aed must be a plain non-negative decimal such as 1000 or 1000.50",
+      "rows": 1,
+      "rows_without_amount": 1,
+      "source": "ads",
+      "status": "rejected",
+      "who_can_fix": "Advertising account owner"
+    },
+    {
+      "amount_aed": "0.00",
+      "example_refs": [
+        "crm:9"
+      ],
+      "reason": "lead_id and campaign_id are required",
+      "rows": 1,
+      "rows_without_amount": 1,
+      "source": "crm",
+      "status": "rejected",
+      "who_can_fix": "CRM owner"
+    },
+    {
+      "amount_aed": "0.00",
+      "example_refs": [
+        "revenue:9"
+      ],
+      "reason": "value_aed must be a plain non-negative decimal such as 1000 or 1000.50",
+      "rows": 1,
+      "rows_without_amount": 1,
+      "source": "revenue",
+      "status": "rejected",
+      "who_can_fix": "Finance or billing owner"
+    }
+  ],
   "human_approval": {
     "allowed_values": [
       "approve",
@@ -989,10 +1137,10 @@
     "evidence_grade": "unsupported",
     "findings": [
       "Attribution coverage is 56.6% [EV-COVER-001], below the rule set's reporting threshold of 80%.",
-      "AED 24500.00 of accepted revenue could not be assigned to a channel [EV-UNMATCH-001].",
-      "AED 9000.00 of that revenue belongs to leads with contradictory CRM records [EV-CONFLICT-001].",
+      "AED 24,500.00 of accepted revenue could not be assigned to a channel [EV-UNMATCH-001].",
+      "AED 9,000.00 of that revenue belongs to leads or customers with contradictory CRM records [EV-CONFLICT-001].",
       "3 rejected, 2 duplicate and 2 conflicting source rows are excluded from every figure; each is listed in row_dispositions.csv.",
-      "AED 3500.00 of attributed revenue arrived more than 30 days after lead creation [EV-WINEXCL-030], so channel figures change with the attribution window."
+      "AED 3,500.00 of attributed revenue arrived more than 30 days after lead creation [EV-WINEXCL-030], so channel figures change with the attribution window."
     ],
     "human_approval_required": true,
     "questions": [
@@ -1011,6 +1159,7 @@
       "record_id": "CMP-SOCIAL-01",
       "severity": "rejected",
       "source": "ads",
+      "source_file": "",
       "source_row": 7,
       "status": "duplicate"
     },
@@ -1019,6 +1168,7 @@
       "record_id": "CMP-BROKEN-01",
       "severity": "rejected",
       "source": "ads",
+      "source_file": "",
       "source_row": 8,
       "status": "rejected"
     },
@@ -1027,6 +1177,7 @@
       "record_id": "LEAD-002",
       "severity": "uncertain",
       "source": "crm",
+      "source_file": "",
       "source_row": 3,
       "status": "conflict"
     },
@@ -1035,6 +1186,7 @@
       "record_id": "LEAD-002",
       "severity": "uncertain",
       "source": "crm",
+      "source_file": "",
       "source_row": 8,
       "status": "conflict"
     },
@@ -1043,6 +1195,7 @@
       "record_id": "row-9",
       "severity": "rejected",
       "source": "crm",
+      "source_file": "",
       "source_row": 9,
       "status": "rejected"
     },
@@ -1051,6 +1204,7 @@
       "record_id": "TX-002",
       "severity": "uncertain",
       "source": "revenue",
+      "source_file": "",
       "source_row": 3,
       "status": "accepted-unattributed"
     },
@@ -1059,6 +1213,7 @@
       "record_id": "TX-005",
       "severity": "uncertain",
       "source": "revenue",
+      "source_file": "",
       "source_row": 6,
       "status": "accepted-unattributed"
     },
@@ -1067,6 +1222,7 @@
       "record_id": "TX-006",
       "severity": "uncertain",
       "source": "revenue",
+      "source_file": "",
       "source_row": 7,
       "status": "accepted-unattributed"
     },
@@ -1075,6 +1231,7 @@
       "record_id": "TX-003",
       "severity": "rejected",
       "source": "revenue",
+      "source_file": "",
       "source_row": 8,
       "status": "duplicate"
     },
@@ -1083,6 +1240,7 @@
       "record_id": "TX-007",
       "severity": "rejected",
       "source": "revenue",
+      "source_file": "",
       "source_row": 9,
       "status": "rejected"
     },
@@ -1091,6 +1249,7 @@
       "record_id": "TX-008",
       "severity": "uncertain",
       "source": "revenue",
+      "source_file": "",
       "source_row": 10,
       "status": "accepted-unattributed"
     }
@@ -1107,7 +1266,7 @@
     "id": "pas95-revenue-evidence-rules",
     "version": "1"
   },
-  "run_id": "5b7c11ad50709cf6",
+  "run_id": "f4e8f6a2f167c5f6",
   "sensitivity": [
     {
       "attributed_revenue_aed": "28500.00",

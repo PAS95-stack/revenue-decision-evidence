@@ -1,0 +1,11 @@
+rows,amount_aed,rows_without_amount,status,source,reason,who_can_fix,example_refs
+1,12500.00,0,duplicate,revenue,duplicate transaction_id,Finance or billing owner,revenue:8
+1,9000.00,0,accepted-unattributed,revenue,lead_id has conflicting CRM records; revenue cannot be attributed,CRM owner,revenue:3
+1,7000.00,0,accepted-unattributed,revenue,CRM campaign_id has no accepted advertising record,Advertising account owner,revenue:6
+1,6000.00,0,accepted-unattributed,revenue,lead_id has no accepted CRM record; revenue cannot be attributed,CRM owner,revenue:7
+1,2500.00,0,accepted-unattributed,revenue,revenue date precedes lead creation date,CRM owner,revenue:10
+1,2000.00,0,duplicate,ads,exact duplicate advertising row,Advertising account owner,ads:7
+2,0.00,2,conflict,crm,lead_id has conflicting campaign attribution,CRM owner,crm:3;crm:8
+1,0.00,1,rejected,ads,spend_aed must be a plain non-negative decimal such as 1000 or 1000.50,Advertising account owner,ads:8
+1,0.00,1,rejected,crm,lead_id and campaign_id are required,CRM owner,crm:9
+1,0.00,1,rejected,revenue,value_aed must be a plain non-negative decimal such as 1000 or 1000.50,Finance or billing owner,revenue:9

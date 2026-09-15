@@ -3,3 +3,5 @@
 # CRLF line endings). Never convert line endings on checkout.
 data/synthetic/*.csv -text
 outputs/synthetic-case/* -text
+examples/**/*.csv -text
+examples/**/*.json -text

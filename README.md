@@ -1,7 +1,7 @@
 # Revenue Decision Evidence
 
-A deterministic workflow that reads three CSV exports — advertising spend, CRM
-leads and revenue transactions — and reports what those exports can and cannot
+A deterministic workflow that reads advertising spend, CRM leads and revenue
+exports and reports what those exports can and cannot
 support about a channel-budget decision.
 
 The included data are synthetic. This repository is a technical demonstration.
@@ -22,6 +22,11 @@ or evidence of paid validation.
 - **Never recommends moving budget.** The report lists data-quality findings and
   the questions that need answers, and always states: *Do not reallocate budget
   from this evidence set alone.*
+- **Reads real exports through a declared engagement config.** Column names,
+  date and number formats, ad accounts in other currencies, refunds and credit
+  notes, revenue that names customers rather than leads, and attribution
+  windows are declared per engagement, never guessed. See
+  [`docs/engagements.md`](docs/engagements.md).
 - **Publishes only what an independent check reproduces.**
   `src/revenue_evidence/reconstruct.py` re-derives every row status and figure
   from the raw CSVs without using the engine's code. If it disagrees, or an
@@ -76,6 +81,31 @@ step checks its expected result and the script stops if one is wrong. Omit
 `--no-pause` to step through it; the spoken guide is in
 [`docs/demo-script.md`](docs/demo-script.md).
 
+## Real client exports
+
+Each engagement lives in its own folder outside this repository:
+
+```bash
+python3 scripts/engagement.py init ~/engagements/client-2026-09 --name "Client, September review"
+```
+
+```bash
+python3 scripts/engagement.py intake ~/engagements/client-2026-09 --received-on 2026-09-16 --received-from "Finance"
+```
+
+```bash
+python3 scripts/engagement.py run ~/engagements/client-2026-09
+```
+
+The worked example reads Meta, Google Ads, HubSpot and Xero-shaped files:
+
+```bash
+PYTHONPATH=src python3 -m revenue_evidence.cli --config examples/messy-exports/engagement.json --output /tmp/example
+```
+
+The full procedure, the config reference and what a config cannot express are in
+[`docs/engagements.md`](docs/engagements.md).
+
 ## Outputs
 
 | File | Contents |
@@ -84,6 +114,7 @@ step checks its expected result and the script stops if one is wrong. Omit
 | `row_dispositions.csv` | Every input row: status, reason, amount and the figures it supports |
 | `lineage.csv` | Figure-to-row traceability with each row's role |
 | `rejected_records.csv` | Every row that is not plainly accepted, with its reason |
+| `exceptions.csv` | Rows that do not count in full, grouped by reason, with the amount they hold and who can fix them |
 | `executive_brief.md` | Readable brief citing an evidence ID beside each figure |
 | `report.html` | The same evidence as a web page |
 | `evaluation_results.json` | Checker result, the checks run, and a SHA-256 hash of each published file |
@@ -102,12 +133,15 @@ duplicates and 2 are in conflict.
 | Evidence level | Status |
 |---|---|
 | Synthetic reproducibility | Implemented; checked by tests and CI |
+| Public-data rehearsal | Run on 25,900 UCI Online Retail invoices with a synthetic CRM and advertising overlay; see `docs/engagements.md` |
 | Permissioned real-data use | Not achieved |
 | Written external evaluation | Not achieved |
 | Paid validation | Not achieved |
 
 ## Documentation
 
+- [`docs/engagements.md`](docs/engagements.md): running on a client's exports, the
+  engagement config reference and the public-data rehearsal
 - [`docs/limitations.md`](docs/limitations.md): what this does not show, known
   limitations, and the design decisions behind the behaviour
 - [`docs/evaluation-cases.md`](docs/evaluation-cases.md): the test suite and its

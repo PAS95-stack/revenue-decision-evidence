@@ -2,7 +2,7 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 103 tests, all passing on Python 3.13 on 15 September 2026, in about
+**Result:** 127 tests, all passing on Python 3.13 on 16 September 2026, in about
 two seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
@@ -123,3 +123,31 @@ minimum.
 | ID | Required behaviour |
 |---|---|
 | w04 | `scripts/demo.sh` runs to completion and every step gets its expected exit code, including rejection of the false and the mislabelled revenue sentence |
+
+## Engagement configs (`test_engagement.py`)
+
+| ID | Required behaviour |
+|---|---|
+| e01 | Messy example (Meta, Google Ads, HubSpot and Xero shapes) publishes the hand-calculated figures; a USD cost in an AED file and a lead without a campaign are rejected; the credit note counts as a refund |
+| e02 | CLI and standalone checker run from the config |
+| e03–e04 | Native exports without a config, or a config naming an absent column: the error names the file, field and columns found |
+| e05 | Values that break the declared format are still rejected; reasons do not copy row values |
+| e06–e07 | 22 kinds of invalid config, and duplicate keys, refused with the reason |
+| e08–e09 | Config, export, exception figures, exceptions.csv or brief changed after publication: detected; a config report cannot be verified as the plain contract |
+| e10 | Reordering files in the config changes no figure or status |
+| e11 | Exceptions grouped by reason, largest amount first, with who can fix them |
+| e12 | Attribution windows come from the config |
+| e13–e15 | Client exports or outputs inside a checkout, or the AI narrative without recorded permission: refused |
+
+## Formats, refunds, currencies and customers (`test_engagement_formats.py`)
+
+| ID | Required behaviour |
+|---|---|
+| f01 | Refunds in parentheses and a credit-note export net into revenue and attribution; a minus sign inside a credit-note export is rejected |
+| f02 | A USD ad account is converted at the declared rate and rounded once per row; an AED amount in a USD export is rejected |
+| f03 | Rejected rows keep readable amounts for the exceptions report without entering any figure |
+| f04 | Revenue joined through customers: repeat leads, several campaigns, contradictory CRM rows, unknown customers and early revenue each get their own reason |
+| f05–f06 | Declared first-touch and last-touch rules credit repeat customers; a rule needs a customer join |
+| f07 | The synthetic case rewritten as messy native exports gives identical figures, statuses and exception totals |
+| f08 | 60 generated datasets under random declared formats: engine and checker never disagree |
+| f09 | Engagement script: a folder inside a checkout, unlogged or changed exports are refused; a logged run publishes; deletion check |

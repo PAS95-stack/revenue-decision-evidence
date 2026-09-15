@@ -37,4 +37,7 @@ deterministic report remains authoritative.
 The organisation remains responsible for legal review and for its obligations
 under applicable UAE data-protection law.
 
+The procedure for a client's exports, including intake logging, the repository
+guard and the deletion check, is in [`engagements.md`](engagements.md).
+
 Limitations and design decisions are in [`limitations.md`](limitations.md).

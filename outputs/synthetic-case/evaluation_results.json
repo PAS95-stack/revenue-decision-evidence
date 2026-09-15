@@ -1,9 +1,11 @@
 {
   "checks": [
     "sources_match_fingerprints",
+    "engagement_config",
     "ruleset_fingerprint_and_run_id",
     "row_dispositions",
     "rejected_records",
+    "exceptions",
     "claim_values",
     "claim_lineage",
     "summary",
@@ -11,16 +13,17 @@
     "executive_brief",
     "sufficient_evidence"
   ],
-  "engine_version": "0.3.1",
+  "engine_version": "0.4.0",
   "failures": [],
   "published_outputs": {
-    "executive_brief.md": "7570e60db9f2fd409146c701ac437a091e569fe35beb1c8efa8c50129b4e4cf6",
+    "exceptions.csv": "5d11bc5657b18a416fffaada6f84194d235f3cf404914cdee0b3feefadbf6277",
+    "executive_brief.md": "da859c8f505df7c2847bef6e25c7b7cf3cac379d736f3c0cfcb87226f974dca7",
     "lineage.csv": "ff44b2667cec2a5523ad72a1208f0527e392e6a810881386383cc776ab7e6996",
-    "rejected_records.csv": "be420669457c161058150fcc57b4e0978a6b3f9fd5d2b137336b7f42a513c57a",
-    "report.html": "8f146e7e70abd153b5620b7a4d2ca6c61395f2e2aa3b99e78c34a4ad61bbdb39",
-    "report.json": "2876911d50a4dfd641791f3d6e51a8cc0054da1dbd4ffe37c950fde9e6670b6e",
-    "row_dispositions.csv": "f1092dcc43f461e9299077e4c0a3c8d17cb81c46bca622357b7ff98a12aaab06"
+    "rejected_records.csv": "d44f3f16a1142fa58ad2ac9823f2514241333e9373e48b4556631f16dfbd3c66",
+    "report.html": "4070e27069a85e899e6e3848dfb1c683918f3439607ab4eb22347e6d0993f75a",
+    "report.json": "7c1b91faa2d0ab321affefba9019d5f8ab8fca56d838db02167915ae3d6f4f32",
+    "row_dispositions.csv": "60651360b95045ccbd56a140bc469205b86e5592ce1ec2dc79a503ac2f98443b"
   },
-  "run_id": "5b7c11ad50709cf6",
+  "run_id": "f4e8f6a2f167c5f6",
   "status": "PASS"
 }

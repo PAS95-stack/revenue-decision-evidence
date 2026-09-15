@@ -1,0 +1,61 @@
+{
+  "config_version": 1,
+  "engagement": "Messy exports example",
+  "data_origin": "synthetic",
+  "attribution_windows_days": [30, 60, 90],
+  "channel_aliases": {
+    "search": "Paid Search",
+    "display": "Display"
+  },
+  "sources": {
+    "ads": [
+      {
+        "file": "meta_ads.csv",
+        "columns": {
+          "date": "Reporting starts",
+          "campaign_id": "Campaign ID",
+          "spend_aed": "Amount spent (AED)"
+        },
+        "fixed": {"channel": "Meta"},
+        "date_format": "DD/MM/YYYY",
+        "amounts": {"thousands_separator": ","}
+      },
+      {
+        "file": "google_ads.csv",
+        "columns": {
+          "date": "Day",
+          "campaign_id": "Campaign ID",
+          "channel": "Campaign type",
+          "spend_aed": "Cost"
+        },
+        "amounts": {"thousands_separator": ",", "currency_label": "AED"}
+      }
+    ],
+    "crm": [
+      {
+        "file": "hubspot_contacts.csv",
+        "columns": {
+          "lead_id": "Record ID",
+          "campaign_id": "UTM Campaign",
+          "created_at": "Create Date",
+          "status": "Lifecycle Stage"
+        },
+        "date_format": "YYYY-MM-DD HH:MM",
+        "uppercase": ["campaign_id"]
+      }
+    ],
+    "revenue": [
+      {
+        "file": "xero_invoices.csv",
+        "columns": {
+          "transaction_id": "InvoiceNumber",
+          "lead_id": "Reference",
+          "value_aed": "Total",
+          "date": "InvoiceDate"
+        },
+        "date_format": "DD/MM/YYYY",
+        "amounts": {"thousands_separator": ",", "refunds": "negative_values"}
+      }
+    ]
+  }
+}

@@ -12,6 +12,7 @@ this), so it can also be run on its own against published outputs:
 
     python3 src/revenue_evidence/reconstruct.py --ads ads.csv --crm crm.csv \
         --revenue revenue.csv --output outputs/run
+    python3 src/revenue_evidence/reconstruct.py --config engagement.json --output outputs/run
 
 Contract choices applied here independently; any disagreement fails verification:
   * amounts are plain non-negative decimals such as "1000" or "1000.50", rounded
@@ -38,7 +39,7 @@ from pathlib import Path
 CENT = Decimal("0.01")
 PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
-DOWNSTREAM_CHECKS = ("claim_values", "claim_lineage", "summary", "channels_and_sensitivity", "executive_brief")
+DOWNSTREAM_CHECKS = ("claim_values", "claim_lineage", "summary", "channels_and_sensitivity", "exceptions", "executive_brief")
 CITATION = re.compile(r"\[(EV-[A-Z]+-\d{3})\]")
 SOURCES = ("ads", "crm", "revenue")
 REQUIRED = {
@@ -49,9 +50,11 @@ REQUIRED = {
 STATUSES = ("accepted", "accepted-unattributed", "rejected", "duplicate", "conflict")
 CHECKS = (
     "sources_match_fingerprints",
+    "engagement_config",
     "ruleset_fingerprint_and_run_id",
     "row_dispositions",
     "rejected_records",
+    "exceptions",
     "claim_values",
     "claim_lineage",
     "summary",
@@ -93,10 +96,248 @@ def _money(value: Decimal) -> str:
     return str(value.quantize(CENT, rounding=ROUND_HALF_UP))
 
 
+def _grouped(value: str) -> str:
+    """Thousands separators for a two-decimal money string, without the format mini-language."""
+    sign = "-" if value.startswith("-") else ""
+    whole, _, fraction = value.lstrip("-").partition(".")
+    digits = whole.lstrip("0") or "0"
+    groups = []
+    while len(digits) > 3:
+        groups.insert(0, digits[-3:])
+        digits = digits[:-3]
+    groups.insert(0, digits)
+    return f"{sign}{','.join(groups)}.{fraction}"
+
+
+def _shown(claim: dict) -> str:
+    return _grouped(claim["value"]) if claim["unit"] == "AED" else claim["value"]
+
+
+def _exception_cell(item: dict) -> str:
+    if item["rows_without_amount"] == item["rows"]:
+        return "—"
+    extra = item["rows_without_amount"]
+    return _grouped(item["amount_aed"]) + (f" (+{extra} without a readable amount)" if extra else "")
+
+
 def _limited(items) -> str:
     items = sorted(str(item) for item in items)
     shown = ", ".join(items[:MAX_DETAILS])
     return shown + (f" and {len(items) - MAX_DETAILS} more" if len(items) > MAX_DETAILS else "")
+
+
+# --- Engagement configs -------------------------------------------------------
+# A config declares, per export file, which column holds each field and how dates
+# and amounts are written. These readers interpret those declarations with their
+# own code; the engine's interpretation must produce the same values.
+
+DEFAULT_WINDOWS = [30, 60, 90]
+DATE_FORMAT_NAMES = tuple(
+    f"{day}{time}" for day in ("YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY") for time in ("", " HH:MM", " HH:MM:SS")
+) + ("YYYY-MM-DDTHH:MM:SS",)
+ISO_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?", re.ASCII)
+CUSTOMER_REQUIRED = {
+    "ads": ("date", "campaign_id", "channel", "spend_aed"),
+    "crm": ("lead_id", "campaign_id", "created_at", "status", "customer_id"),
+    "revenue": ("transaction_id", "customer_id", "value_aed", "date"),
+}
+FIXABLE = {"ads": ("channel",), "crm": ("status",), "revenue": ()}
+IDENTIFIERS = {
+    "ads": ("campaign_id",),
+    "crm": ("lead_id", "campaign_id", "customer_id"),
+    "revenue": ("transaction_id", "lead_id", "customer_id"),
+}
+REFUND_MODES = ("reject", "negative_values", "whole_file")
+
+
+def _ref(source: str, label: str, line: int) -> str:
+    return f"{source}/{label}:{line}" if label else f"{source}:{line}"
+
+
+def _field(row: dict, spec: dict, name: str) -> str:
+    value = spec["fixed"][name] if name in spec["fixed"] else _text(row, spec["columns"][name])
+    return value.upper() if name in spec["uppercase"] else value
+
+
+def _declared_date(text: str, fmt: str) -> date | None:
+    if fmt == "YYYY-MM-DDTHH:MM:SS":
+        return _day(text[:10]) if ISO_DATETIME.fullmatch(text) else None
+    day_format, _, time_format = fmt.partition(" ")
+    day_text, _, time_text = text.partition(" ")
+    if bool(time_format) != bool(time_text):
+        return None
+    if time_format:
+        pieces = time_text.split(":")
+        if (
+            len(pieces) != time_format.count(":") + 1
+            or not all(piece.isascii() and piece.isdigit() for piece in pieces)
+            or not 1 <= len(pieces[0]) <= 2
+            or any(len(piece) != 2 for piece in pieces[1:])
+        ):
+            return None
+    if day_format == "YYYY-MM-DD":
+        return _day(day_text)
+    parts = day_text.split("/")
+    if len(parts) != 3 or not all(part.isascii() and part.isdigit() for part in parts):
+        return None
+    first, second, year = parts
+    if not (1 <= len(first) <= 2 and 1 <= len(second) <= 2 and len(year) == 4):
+        return None
+    day, month = (first, second) if day_format == "DD/MM/YYYY" else (second, first)
+    try:
+        return date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+
+
+def _declared_amount(text: str, spec: dict) -> Decimal | None:
+    label = spec["currency_label"]
+    if label and text.startswith(label):
+        text = text[len(label):].lstrip()
+    elif label and text.endswith(label):
+        text = text[: -len(label)].rstrip()
+    negative = False
+    if len(text) >= 3 and text.startswith("(") and text.endswith(")"):
+        text, negative = text[1:-1].strip(), True
+    elif text[:1] == "-":
+        text, negative = text[1:].lstrip(), True
+    if negative and spec["refunds"] != "negative_values":
+        return None
+    if spec["thousands_separator"]:
+        whole, point, fraction = text.partition(".")
+        groups = whole.split(",")
+        if len(groups) > 1 and (not 1 <= len(groups[0]) <= 3 or any(len(group) != 3 for group in groups[1:])):
+            return None
+        text = "".join(groups) + point + fraction
+    if not PLAIN_DECIMAL.fullmatch(text) or len(text.partition(".")[0]) > 15:
+        return None
+    value = (Decimal(text) * Decimal(spec["aed_per_unit"])).quantize(CENT, rounding=ROUND_HALF_UP)
+    if value == 0:
+        return Decimal("0.00")
+    return -value if negative or spec["refunds"] == "whole_file" else value
+
+
+def _plain_spec(name: str, path) -> dict:
+    """The three-file contract expressed as a spec: canonical columns, ISO dates, plain amounts."""
+    return {
+        "path": Path(path), "label": "", "columns": {field: field for field in REQUIRED[name]}, "fixed": {},
+        "date_format": "YYYY-MM-DD", "thousands_separator": "", "currency_label": "", "currency": "AED",
+        "aed_per_unit": "1", "rate_source": "", "refunds": "reject", "uppercase": set(), "required": REQUIRED[name],
+    }
+
+
+def _load_config(path) -> dict:
+    config_path = Path(path)
+    try:
+        raw = config_path.read_bytes()
+        config = json.loads(raw.decode("utf-8"))
+    except OSError as exc:
+        raise ReconstructionError(f"cannot read the engagement config ({type(exc).__name__})") from exc
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ReconstructionError("the engagement config is not valid JSON") from exc
+
+    def need(condition, message: str) -> None:
+        if not condition:
+            raise ReconstructionError(f"engagement config: {message}")
+
+    need(isinstance(config, dict), "must be a JSON object")
+    need(type(config.get("config_version")) is int and config.get("config_version") == 1, "config_version must be 1")
+    join = config.get("revenue_join", "lead_id")
+    need(join in ("lead_id", "customer_id"), "revenue_join must be lead_id or customer_id")
+    required = REQUIRED if join == "lead_id" else CUSTOMER_REQUIRED
+    rule = config.get("multiple_campaigns", "unattributed")
+    need(rule in ("unattributed", "first_touch", "last_touch"), "multiple_campaigns is invalid")
+    need(rule == "unattributed" or join == "customer_id", "multiple_campaigns needs revenue_join customer_id")
+    windows = config.get("attribution_windows_days", DEFAULT_WINDOWS)
+    need(
+        isinstance(windows, list) and 1 <= len(windows) <= 5
+        and all(type(window) is int and 1 <= window <= 999 for window in windows)
+        and windows == sorted(set(windows)),
+        "attribution_windows_days is invalid",
+    )
+    aliases = config.get("channel_aliases", {})
+    need(isinstance(aliases, dict) and all(isinstance(value, str) for value in aliases.values()), "channel_aliases is invalid")
+    sources = config.get("sources")
+    need(isinstance(sources, dict) and sorted(sources) == sorted(SOURCES), "sources must declare ads, crm and revenue")
+    files: dict[str, list[dict]] = {}
+    described = []
+    for name in SOURCES:
+        entries = sources[name]
+        need(isinstance(entries, list) and entries, f"sources.{name} must list at least one file")
+        files[name] = []
+        for entry in entries:
+            need(isinstance(entry, dict), f"sources.{name} entries must be objects")
+            label = entry.get("file")
+            need(
+                isinstance(label, str) and label and not label.startswith("/")
+                and all(part not in ("", ".", "..") for part in label.split("/"))
+                and not any(mark in label for mark in ":\\|`"),
+                f"sources.{name} names an invalid file",
+            )
+            columns, fixed = entry.get("columns", {}), entry.get("fixed", {})
+            need(isinstance(columns, dict) and isinstance(fixed, dict), f"{label}: columns and fixed must be objects")
+            need(
+                not set(columns) & set(fixed) and sorted(set(columns) | set(fixed)) == sorted(required[name])
+                and set(fixed) <= set(FIXABLE[name]),
+                f"{label}: every field needs exactly one column or allowed fixed value",
+            )
+            date_format = entry.get("date_format", "YYYY-MM-DD")
+            need(date_format in DATE_FORMAT_NAMES, f"{label}: unknown date_format")
+            amounts = entry.get("amounts", {})
+            need(isinstance(amounts, dict), f"{label}: amounts must be an object")
+            currency = amounts.get("currency", {})
+            need(isinstance(currency, dict), f"{label}: currency must be an object")
+            code = currency.get("code", "AED")
+            rate = currency.get("aed_per_unit", "1")
+            need(
+                isinstance(rate, str) and PLAIN_DECIMAL.fullmatch(rate) is not None and Decimal(rate) > 0
+                and (code != "AED" or rate == "1"),
+                f"{label}: invalid currency rate",
+            )
+            refunds = amounts.get("refunds", "reject")
+            need(refunds in REFUND_MODES and (name == "revenue" or refunds == "reject"), f"{label}: invalid refunds")
+            uppercase = entry.get("uppercase", [])
+            need(
+                isinstance(uppercase, list) and all(isinstance(item, str) for item in uppercase)
+                and set(uppercase) <= set(IDENTIFIERS[name]),
+                f"{label}: invalid uppercase",
+            )
+            spec = {
+                "path": config_path.parent / label, "label": label, "columns": columns, "fixed": fixed,
+                "date_format": date_format, "thousands_separator": amounts.get("thousands_separator", ""),
+                "currency_label": amounts.get("currency_label", ""), "currency": code, "aed_per_unit": rate,
+                "rate_source": currency.get("rate_source", ""), "refunds": refunds, "uppercase": set(uppercase),
+                "required": required[name],
+            }
+            files[name].append(spec)
+            described.append(
+                {
+                    "source": name, "file": label, "columns": dict(columns), "fixed": dict(fixed),
+                    "date_format": date_format, "thousands_separator": spec["thousands_separator"],
+                    "currency_label": spec["currency_label"], "currency": code, "aed_per_unit": rate,
+                    "rate_source": spec["rate_source"], "refunds": refunds, "uppercase": sorted(set(uppercase)),
+                }
+            )
+    fingerprint = hashlib.sha256(raw).hexdigest()
+    folded = {key.casefold(): value for key, value in aliases.items()}
+    return {
+        "files": files,
+        "windows": windows,
+        "aliases": folded,
+        "join": join,
+        "rule": rule,
+        "fingerprint": fingerprint,
+        "declared": {
+            "name": config.get("engagement"),
+            "data_origin": config.get("data_origin"),
+            "config_fingerprint": fingerprint,
+            "attribution_windows_days": list(windows),
+            "channel_aliases": dict(sorted(folded.items())),
+            "revenue_join": join,
+            "multiple_campaigns": rule,
+            "files": described,
+        },
+    }
 
 
 def _record_start_lines(text: str) -> list[int]:
@@ -144,23 +385,28 @@ def _record_start_lines(text: str) -> list[int]:
     return starts
 
 
-def _read_rows(path, required) -> list[tuple[int, dict]]:
-    name = Path(path).name
+def _read_rows(spec: dict) -> list[tuple[int, dict]]:
+    path = Path(spec["path"])
+    name = spec["label"] or path.name
     try:
-        text = Path(path).read_bytes().decode("utf-8-sig")
+        text = path.read_bytes().decode("utf-8-sig")
     except OSError as exc:
         raise ReconstructionError(f"cannot read {name} ({type(exc).__name__})") from exc
     except UnicodeDecodeError as exc:
         raise ReconstructionError(f"{name} is not UTF-8 text") from exc
     try:
         reader = csv.DictReader(io.StringIO(text, newline=""))
-        fieldnames = reader.fieldnames
+        fieldnames = list(reader.fieldnames or [])
         rows = [dict(row) for row in reader]
     except csv.Error as exc:
         raise ReconstructionError(f"{name} is not a readable CSV ({exc})") from exc
-    missing = set(required) - set(fieldnames or [])
+    headers = [spec["columns"][field] for field in spec["required"] if field in spec["columns"]]
+    missing = [header for header in headers if header not in fieldnames]
     if missing:
         raise ReconstructionError(f"{name} is missing required columns: {', '.join(sorted(missing))}")
+    repeated = sorted({header for header in headers if fieldnames.count(header) > 1})
+    if repeated:
+        raise ReconstructionError(f"{name} has more than one column named {', '.join(repeated)}")
     starts = _record_start_lines(text)
     if len(starts) != len(rows) + 1:
         raise ReconstructionError(f"cannot align the records of {name} to physical lines")
@@ -196,23 +442,53 @@ def _resolve(items: list[dict], key: str, signature, status: dict) -> tuple[list
     return kept, conflicts
 
 
-def derive(sources: dict, windows: list[int]) -> dict:
-    """Every row status and every published figure, from the raw exports alone."""
-    raw = {name: _read_rows(sources[name], REQUIRED[name]) for name in SOURCES}
+def derive(
+    sources: dict, windows: list[int], aliases: dict | None = None, join: str = "lead_id", rule: str = "unattributed"
+) -> dict:
+    """Every row status and every published figure, from the raw exports alone.
+
+    sources maps each source to one CSV path (the three-file contract) or to the
+    file specs read from an engagement config.
+    """
+    specs = {
+        name: sources[name] if isinstance(sources[name], list) else [_plain_spec(name, sources[name])]
+        for name in SOURCES
+    }
+    aliases = aliases or {}
+    raw = {
+        name: [(index, spec, number, row) for index, spec in enumerate(specs[name]) for number, row in _read_rows(spec)]
+        for name in SOURCES
+    }
     status: dict[str, str] = {}
     amount: dict[str, str] = {}
+    source_of: dict[str, str] = {}
+    order: dict[str, tuple] = {}
+
+    def track(name: str, index: int, spec: dict, number: int) -> str:
+        ref = _ref(name, spec["label"], number)
+        source_of[ref], order[ref], amount[ref] = name, (SOURCES.index(name), index, number), ""
+        return ref
+
+    def read_date(row: dict, spec: dict, field: str):
+        text = _field(row, spec, field)
+        return _declared_date(text, spec["date_format"]) if spec["label"] else _day(text)
+
+    def read_amount(row: dict, spec: dict, field: str):
+        text = _field(row, spec, field)
+        return _declared_amount(text, spec) if spec["label"] else _amount(text)
 
     valid_ads = []
-    for number, row in raw["ads"]:
-        ref = f"ads:{number}"
-        campaign, channel = _text(row, "campaign_id"), _text(row, "channel")
-        day, spend = _day(_text(row, "date")), _amount(_text(row, "spend_aed"))
-        amount[ref] = ""
+    for index, spec, number, row in raw["ads"]:
+        ref = track("ads", index, spec, number)
+        campaign, channel = _field(row, spec, "campaign_id"), _field(row, spec, "channel")
+        channel = aliases.get(channel.casefold(), channel)
+        day, spend = read_date(row, spec, "date"), read_amount(row, spec, "spend_aed")
+        if spend is not None:
+            amount[ref] = _money(spend)
         if not campaign or not channel or any(mark in campaign + channel for mark in "[]") or day is None or spend is None:
             status[ref] = "rejected"
             continue
-        amount[ref] = _money(spend)
-        valid_ads.append({"ref": ref, "row": number, "date": day, "campaign": campaign, "channel": channel, "spend": spend})
+        valid_ads.append({"ref": ref, "row": order[ref], "date": day, "campaign": campaign, "channel": channel, "spend": spend})
     channels_by_campaign: dict[str, set] = {}
     for item in valid_ads:
         channels_by_campaign.setdefault(item["campaign"], set()).add(item["channel"])
@@ -229,49 +505,74 @@ def derive(sources: dict, windows: list[int]) -> dict:
         status[item["ref"]] = "accepted"
         ads.append(item)
 
+    customer_join = join == "customer_id"
     valid_crm = []
-    for number, row in raw["crm"]:
-        ref = f"crm:{number}"
-        amount[ref] = ""
-        lead, campaign = _text(row, "lead_id"), _text(row, "campaign_id")
-        created, stage = _day(_text(row, "created_at")), _text(row, "status").lower()
-        if not lead or not campaign or created is None or not stage:
+    for index, spec, number, row in raw["crm"]:
+        ref = track("crm", index, spec, number)
+        lead, campaign = _field(row, spec, "lead_id"), _field(row, spec, "campaign_id")
+        customer = _field(row, spec, "customer_id") if customer_join else ""
+        created, stage = read_date(row, spec, "created_at"), _field(row, spec, "status").lower()
+        if not lead or not campaign or created is None or not stage or (customer_join and not customer):
             status[ref] = "rejected"
             continue
-        valid_crm.append({"ref": ref, "row": number, "lead": lead, "campaign": campaign, "created": created, "stage": stage})
+        valid_crm.append(
+            {"ref": ref, "row": order[ref], "lead": lead, "campaign": campaign, "created": created, "stage": stage, "customer": customer}
+        )
     crm, conflicting_leads = _resolve(
-        valid_crm, "lead", lambda item: (item["campaign"], item["created"], item["stage"]), status
+        valid_crm, "lead", lambda item: (item["campaign"], item["created"], item["stage"], item["customer"]), status
     )
 
+    link = "customer_id" if customer_join else "lead_id"
     valid_revenue = []
-    for number, row in raw["revenue"]:
-        ref = f"revenue:{number}"
-        amount[ref] = ""
-        transaction, lead = _text(row, "transaction_id"), _text(row, "lead_id")
-        value, day = _amount(_text(row, "value_aed")), _day(_text(row, "date"))
+    for index, spec, number, row in raw["revenue"]:
+        ref = track("revenue", index, spec, number)
+        transaction, lead = _field(row, spec, "transaction_id"), _field(row, spec, link)
+        value, day = read_amount(row, spec, "value_aed"), read_date(row, spec, "date")
+        if value is not None:
+            amount[ref] = _money(value)
         if not transaction or not lead or value is None or day is None:
             status[ref] = "rejected"
             continue
-        amount[ref] = _money(value)
-        valid_revenue.append({"ref": ref, "row": number, "transaction": transaction, "lead": lead, "value": value, "date": day})
+        valid_revenue.append({"ref": ref, "row": order[ref], "transaction": transaction, "lead": lead, "value": value, "date": day})
     revenue, _ = _resolve(
         valid_revenue, "transaction", lambda item: (item["lead"], item["value"], item["date"]), status
     )
 
-    leads = {item["lead"]: item for item in crm}
+    # Revenue reaches CRM records through its lead, or through every accepted lead of its customer.
+    def key_of(item: dict) -> str:
+        return item["customer"] if customer_join else item["lead"]
+
+    leads: dict[str, list] = {}
+    for item in crm:
+        leads.setdefault(key_of(item), []).append(item)
+    crm_by_ref = {item["ref"]: item for item in valid_crm}
+    conflicting: dict[str, set] = {}
+    for members in conflicting_leads.values():
+        for ref in members:
+            conflicting.setdefault(key_of(crm_by_ref[ref]), set()).add(ref)
     campaign_channel = {item["campaign"]: item["channel"] for item in ads}
     attributed, unattributed, conflicted = [], [], []
     for item in revenue:
-        lead = leads.get(item["lead"])
-        channel = campaign_channel.get(lead["campaign"]) if lead else None
-        if lead is None or channel is None or item["date"] < lead["created"]:
+        candidates = sorted(leads.get(item["lead"], []), key=lambda lead: (lead["created"], lead["row"]))
+        first = candidates[0] if candidates else None
+        if rule == "last_touch":
+            by_then = [lead for lead in candidates if lead["created"] <= item["date"]]
+            first = by_then[-1] if by_then else first
+        single_campaign = rule != "unattributed" or len({lead["campaign"] for lead in candidates}) == 1
+        channel = campaign_channel.get(first["campaign"]) if first is not None and single_campaign else None
+        if first is None or channel is None or item["date"] < first["created"]:
             status[item["ref"]] = "accepted-unattributed"
             unattributed.append(item)
-            if lead is None and item["lead"] in conflicting_leads:
+            if first is None and item["lead"] in conflicting:
                 conflicted.append(item)
             continue
         attributed.append(
-            {**item, "channel": channel, "crm_ref": lead["ref"], "delay": (item["date"] - lead["created"]).days}
+            {
+                **item,
+                "channel": channel,
+                "crm_refs": {lead["ref"] for lead in candidates},
+                "delay": (item["date"] - first["created"]).days,
+            }
         )
 
     def total(items, key):
@@ -281,7 +582,7 @@ def derive(sources: dict, windows: list[int]) -> dict:
         return {item["ref"] for item in items}
 
     def joins(items):
-        return {item["crm_ref"] for item in items}
+        return {ref for item in items for ref in item["crm_refs"]}
 
     claims: dict[str, dict] = {}
 
@@ -307,8 +608,12 @@ def derive(sources: dict, windows: list[int]) -> dict:
     claim(
         "EV-CONFLICT-001", _money(total(conflicted, "value")), "AED",
         summand=refs(conflicted),
-        join={ref for item in conflicted for ref in conflicting_leads[item["lead"]]},
+        join={ref for item in conflicted for ref in conflicting[item["lead"]]},
     )
+    declares_refunds = any(spec["refunds"] != "reject" for spec in specs["revenue"])
+    refund_rows = [item for item in revenue if item["value"] < 0]
+    if declares_refunds:
+        claim("EV-REFUND-001", _money(total(refund_rows, "value")), "AED", summand=refs(refund_rows))
 
     channels = []
     for index, name in enumerate(sorted({item["channel"] for item in ads}), start=1):
@@ -355,7 +660,7 @@ def derive(sources: dict, windows: list[int]) -> dict:
 
     counts = {name: {"input": len(raw[name]), **{value: 0 for value in STATUSES}} for name in SOURCES}
     for ref, value in status.items():
-        counts[ref.split(":", 1)[0]][value] += 1
+        counts[source_of[ref]][value] += 1
     summary = {
         "accepted_spend_aed": _money(spend_total),
         "accepted_revenue_aed": _money(revenue_total),
@@ -367,9 +672,13 @@ def derive(sources: dict, windows: list[int]) -> dict:
         "row_status_counts": counts,
         "rejected_or_uncertain_rows": sum(1 for value in status.values() if value != "accepted"),
     }
+    if declares_refunds:
+        summary["refunded_revenue_aed"] = _money(total(refund_rows, "value"))
     return {
         "status": status,
         "amount": amount,
+        "order": order,
+        "source_of": source_of,
         "claims": claims,
         "channels": channels,
         "sensitivity": sensitivity,
@@ -393,7 +702,8 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
         failures.append(f"{check}: {message}")
 
     try:
-        if not source_paths or any(not source_paths.get(name) for name in SOURCES):
+        config_path = (source_paths or {}).get("config")
+        if not config_path and (not source_paths or any(not source_paths.get(name) for name in SOURCES)):
             raise ReconstructionError("source CSV paths were not supplied")
         try:
             report = json.loads((output / "report.json").read_text(encoding="utf-8"))
@@ -402,13 +712,31 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
         except ValueError as exc:
             raise ReconstructionError("report.json is not valid JSON") from exc
 
-        for name in SOURCES:
+        config = _load_config(config_path) if config_path else None
+        if config:
+            inputs = config["files"]
+            files = [(f"{name}/{spec['label']}", spec["path"]) for name in SOURCES for spec in inputs[name]]
+            published_engagement = report.get("engagement") or {}
+            if published_engagement.get("config_fingerprint") != config["fingerprint"]:
+                fail("engagement_config", "the engagement config changed since the report was computed")
+            elif published_engagement != config["declared"]:
+                fail("engagement_config", "the declared interpretations in report.json do not match the engagement config")
+        else:
+            inputs = {name: source_paths[name] for name in SOURCES}
+            files = [(name, source_paths[name]) for name in SOURCES]
+            if report.get("engagement") is not None:
+                fail("engagement_config", "report.json declares an engagement config, but none was supplied")
+        published_fingerprints = report.get("source_fingerprints", {})
+        for key, file_path in files:
             try:
-                actual = hashlib.sha256(Path(source_paths[name]).read_bytes()).hexdigest()
+                actual = hashlib.sha256(Path(file_path).read_bytes()).hexdigest()
             except OSError as exc:
-                raise ReconstructionError(f"cannot read the {name} export ({type(exc).__name__})") from exc
-            if report.get("source_fingerprints", {}).get(name) != actual:
-                fail("sources_match_fingerprints", f"the {name} export changed since the report was computed")
+                raise ReconstructionError(f"cannot read the {key} export ({type(exc).__name__})") from exc
+            if published_fingerprints.get(key) != actual:
+                fail("sources_match_fingerprints", f"the {key} export changed since the report was computed")
+        unlisted = set(published_fingerprints) - {key for key, _ in files}
+        if unlisted:
+            fail("sources_match_fingerprints", f"report.json lists exports that were not supplied: {_limited(unlisted)}")
 
         ruleset = dict(report.get("ruleset", {}))
         declared = ruleset.pop("fingerprint", None)
@@ -417,18 +745,23 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
             fail("ruleset_fingerprint_and_run_id", "the published rule set does not match its fingerprint")
         identity = "\n".join(
             [f"engine:{report.get('engine_version')}", f"ruleset:{computed}", f"as_of:{report.get('as_of') or ''}"]
+            + ([f"config:{config['fingerprint']}"] if config else [])
             + [f"{name}:{digest}" for name, digest in sorted(report.get("source_fingerprints", {}).items())]
         )
         if report.get("run_id") != hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]:
             fail("ruleset_fingerprint_and_run_id", "run_id does not identify these inputs, engine and rule set")
-        windows = ruleset.get("attribution_windows_days")
+        windows = config["windows"] if config else ruleset.get("attribution_windows_days")
         if not isinstance(windows, list) or not windows or not all(isinstance(w, int) and w > 0 for w in windows):
             raise ReconstructionError("the rule set does not declare valid attribution windows")
+        if config and ruleset.get("attribution_windows_days") != windows:
+            fail("engagement_config", "the rule set's attribution windows differ from the engagement config")
 
-        expected = derive(source_paths, windows)
+        expected = (
+            derive(inputs, windows, config["aliases"], config["join"], config["rule"]) if config else derive(inputs, windows)
+        )
 
         dispositions = _read_csv_output(output / "row_dispositions.csv")
-        seen_refs = [f"{row['source']}:{row['source_row']}" for row in dispositions]
+        seen_refs = [_ref(row["source"], row.get("source_file", ""), row["source_row"]) for row in dispositions]
         duplicated = {ref for ref in seen_refs if seen_refs.count(ref) > 1}
         if duplicated:
             fail("row_dispositions", f"rows listed more than once: {_limited(duplicated)}")
@@ -454,11 +787,57 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
             fail("row_dispositions", f"amount disagrees: {_limited(wrong_amount)}")
 
         rejected_rows = _read_csv_output(output / "rejected_records.csv")
-        published_rejected = {(f"{row['source']}:{row['source_row']}", row["status"]) for row in rejected_rows}
+        published_rejected = {
+            (_ref(row["source"], row.get("source_file", ""), row["source_row"]), row["status"]) for row in rejected_rows
+        }
         expected_rejected = {(ref, value) for ref, value in expected["status"].items() if value != "accepted"}
         if published_rejected != expected_rejected:
             difference = published_rejected ^ expected_rejected
             fail("rejected_records", f"rejected_records.csv disagrees on: {_limited(ref for ref, _ in difference)}")
+
+        # Exception groups use the published reason labels, but their row counts, amounts
+        # and examples come from the reconstructed statuses and amounts.
+        groups: dict[tuple, list] = {}
+        for ref, row in sorted(zip(seen_refs, dispositions), key=lambda pair: expected["order"].get(pair[0], (9,))):
+            want_status = expected["status"].get(ref)
+            if want_status in (None, "accepted"):
+                continue
+            groups.setdefault((expected["source_of"][ref], want_status, row.get("reason", "")), []).append(ref)
+        expected_exceptions = []
+        for (name, value, reason), members in groups.items():
+            amounts = [Decimal(expected["amount"][ref]) for ref in members if expected["amount"][ref]]
+            expected_exceptions.append(
+                {
+                    "source": name,
+                    "status": value,
+                    "reason": reason,
+                    "rows": len(members),
+                    "amount_aed": _money(sum(amounts, Decimal("0"))),
+                    "rows_without_amount": len(members) - len(amounts),
+                    "example_refs": members[:3],
+                }
+            )
+        expected_exceptions.sort(
+            key=lambda item: (
+                -abs(Decimal(item["amount_aed"])), -item["rows"], SOURCES.index(item["source"]), item["status"], item["reason"]
+            )
+        )
+        exception_fields = ("source", "status", "reason", "rows", "amount_aed", "rows_without_amount", "example_refs")
+        published_exceptions = [{field: item.get(field) for field in exception_fields} for item in report.get("exceptions", [])]
+        if published_exceptions != expected_exceptions:
+            fail("exceptions", "exception groups in report.json do not match the reconstructed row statuses and amounts")
+        exceptions_path = output / "exceptions.csv"
+        if not exceptions_path.exists():
+            fail("exceptions", "exceptions.csv is missing")
+        else:
+            as_csv = [
+                {**item, "rows": str(item["rows"]), "rows_without_amount": str(item["rows_without_amount"]),
+                 "example_refs": ";".join(item["example_refs"])}
+                for item in expected_exceptions
+            ]
+            written = [{field: row.get(field) for field in exception_fields} for row in _read_csv_output(exceptions_path)]
+            if written != as_csv:
+                fail("exceptions", "exceptions.csv does not match the reconstructed exception groups")
 
         published = {claim["evidence_id"]: claim for claim in report.get("claims", [])}
         for evidence_id in sorted(set(expected["claims"]) - set(published)):
@@ -521,15 +900,18 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
         for evidence_id, want in expected["claims"].items():
             if brief and f"[{evidence_id}]" not in brief:
                 fail("executive_brief", f"the brief omits {evidence_id}")
-            elif brief and want["value"] not in brief:
-                fail("executive_brief", f"the brief does not show {want['value']} for {evidence_id}")
+            elif brief and _shown(want) not in brief:
+                fail("executive_brief", f"the brief does not show {_shown(want)} for {evidence_id}")
         for finding in report.get("recommendation", {}).get("findings", []):
             for evidence_id in CITATION.findall(finding):
                 want = expected["claims"].get(evidence_id)
                 if want is None:
                     fail("executive_brief", f"a finding cites {evidence_id}, which cannot be reconstructed")
-                elif want["value"] not in finding:
-                    fail("executive_brief", f"a finding citing {evidence_id} does not state {want['value']}")
+                elif _shown(want) not in finding:
+                    fail("executive_brief", f"a finding citing {evidence_id} does not state {_shown(want)}")
+        for item in expected_exceptions[:10]:
+            if brief and f"| {item['rows']} | {_exception_cell(item)} |" not in brief:
+                fail("executive_brief", f"the brief does not list the {item['source']} {item['status']} exception group")
 
         counts = expected["summary"]["row_status_counts"]
         for name in SOURCES:
@@ -564,12 +946,19 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Independently reconstruct and verify a revenue evidence report")
-    parser.add_argument("--ads", required=True)
-    parser.add_argument("--crm", required=True)
-    parser.add_argument("--revenue", required=True)
+    parser.add_argument("--ads")
+    parser.add_argument("--crm")
+    parser.add_argument("--revenue")
+    parser.add_argument("--config", help="The engagement config the report was computed from")
     parser.add_argument("--output", required=True, help="Directory containing the published outputs")
     args = parser.parse_args(argv)
-    checks, failures = verify_outputs({"ads": args.ads, "crm": args.crm, "revenue": args.revenue}, args.output)
+    plain = [args.ads, args.crm, args.revenue]
+    if args.config and any(plain):
+        parser.error("use either --config or --ads, --crm and --revenue, not both")
+    if not args.config and not all(plain):
+        parser.error("--ads, --crm and --revenue are required unless --config is given")
+    sources = {"config": args.config} if args.config else {"ads": args.ads, "crm": args.crm, "revenue": args.revenue}
+    checks, failures = verify_outputs(sources, args.output)
     print(json.dumps({"status": "FAIL" if failures else "PASS", "checks": checks, "failures": failures}, indent=2))
     return 1 if failures else 0
 

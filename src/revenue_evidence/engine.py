@@ -22,7 +22,7 @@ MONEY = Decimal("0.01")
 
 # Part of every run_id: a change to the computation must not reuse an old identity.
 # Kept equal to pyproject.toml's version by test.
-ENGINE_VERSION = "0.3.1"
+ENGINE_VERSION = "0.4.0"
 
 # Every threshold and window the report depends on, published in the report. The
 # whole content (not just the version label) is hashed into run_id.
@@ -41,6 +41,9 @@ REASON_NO_LEAD = "lead_id has no accepted CRM record; revenue cannot be attribut
 REASON_CONFLICTING_CAMPAIGN = "CRM campaign_id maps to conflicting advertising channels"
 REASON_NO_CAMPAIGN = "CRM campaign_id has no accepted advertising record"
 REASON_CHRONOLOGY = "revenue date precedes lead creation date"
+REASON_NO_CUSTOMER = "customer_id has no accepted CRM record; revenue cannot be attributed"
+REASON_CONFLICTING_CUSTOMER = "customer_id has only conflicting CRM records; revenue cannot be attributed"
+REASON_CUSTOMER_CAMPAIGNS = "customer_id has accepted CRM leads from more than one campaign"
 
 # Every input row receives exactly one status. Only the two "accepted" statuses
 # may contribute to a total; the others are visible but excluded.
@@ -78,6 +81,8 @@ class RowDisposition:
     status: str
     reason: str
     amount_aed: str
+    # The export file as named in an engagement config; empty for the three-file contract.
+    source_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,7 @@ class RejectedRecord:
     severity: str
     reason: str
     status: str
+    source_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -124,8 +130,15 @@ class EvidenceReport:
     recommendation: dict[str, Any]
     human_approval: dict[str, Any]
     narrative: dict[str, Any]
-    # Where the exports were read from, so publication can re-read them for
-    # independent verification. Never serialised: paths differ between machines.
+    # Rows excluded from every figure, or counted without a channel, grouped by
+    # reason with the amount they hold, largest first.
+    exceptions: list[dict[str, Any]] = field(default_factory=list)
+    # The declared interpretations of an engagement config; None for the plain
+    # three-file contract.
+    engagement: dict[str, Any] | None = None
+    # Where the exports (or the engagement config) were read from, so publication
+    # can re-read them for independent verification. Never serialised: paths
+    # differ between machines.
     source_paths: dict[str, str] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -136,6 +149,11 @@ class EvidenceReport:
 
 def _money(value: Decimal) -> str:
     return str(value.quantize(MONEY, rounding=ROUND_HALF_UP))
+
+
+def _grouped(amount: str) -> str:
+    """A money string as a reader expects it: 24500.00 becomes 24,500.00."""
+    return f"{Decimal(amount):,.2f}"
 
 
 PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
@@ -178,7 +196,434 @@ def _fingerprint(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _read_csv(path: Path, required: set[str]) -> list[tuple[int, dict[str, Any]]]:
+SOURCES = ("ads", "crm", "revenue")
+CANONICAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "ads": ("date", "campaign_id", "channel", "spend_aed"),
+    "crm": ("lead_id", "campaign_id", "created_at", "status"),
+    "revenue": ("transaction_id", "lead_id", "value_aed", "date"),
+}
+AMOUNT_FIELDS = {"ads": ("spend_aed",), "crm": (), "revenue": ("value_aed",)}
+IDENTIFIER_FIELDS = {
+    "ads": ("campaign_id",),
+    "crm": ("lead_id", "campaign_id", "customer_id"),
+    "revenue": ("transaction_id", "lead_id", "customer_id"),
+}
+# When revenue records name a customer instead of a lead, CRM rows carry that
+# customer and revenue joins through it.
+CUSTOMER_JOIN_FIELDS: dict[str, tuple[str, ...]] = {
+    "ads": CANONICAL_FIELDS["ads"],
+    "crm": (*CANONICAL_FIELDS["crm"], "customer_id"),
+    "revenue": ("transaction_id", "customer_id", "value_aed", "date"),
+}
+REVENUE_JOINS = ("lead_id", "customer_id")
+# How a customer whose accepted leads came from more than one campaign is credited:
+# not at all, to the earliest lead, or to the latest lead created by the transaction date.
+MULTIPLE_CAMPAIGN_RULES = ("unattributed", "first_touch", "last_touch")
+# reject: a negative amount is an error. negative_values: "-500.00" or "(500.00)" is a
+# refund or credit note. whole_file: every row of the file is a refund written as a
+# positive amount (a separate credit-note export).
+REFUND_MODES = ("reject", "negative_values", "whole_file")
+CURRENCY_CODE = re.compile(r"[A-Z]{3}")
+MAX_INTEGER_DIGITS = 15
+# Only descriptive labels may be declared once for a whole file (a Meta export has no
+# channel column). Identifiers, dates and amounts must come from the rows themselves.
+FIXABLE_FIELDS = {"ads": ("channel",), "crm": ("status",), "revenue": ()}
+DATA_ORIGINS = ("synthetic", "public", "client")
+CONFIG_KEYS = frozenset(
+    {
+        "config_version", "engagement", "data_origin", "attribution_windows_days", "channel_aliases", "revenue_join",
+        "multiple_campaigns", "sources",
+    }
+)
+FILE_KEYS = frozenset({"file", "columns", "fixed", "date_format", "amounts", "uppercase"})
+MAX_FILES_PER_SOURCE = 20
+MAX_WINDOWS = 5
+
+# Date formats an engagement config may declare. Each file declares exactly one, so
+# 03/07/2026 is never read as both 3 July and 7 March. A time of day, when the format
+# includes one, is matched and then ignored: only the calendar date as written is used.
+_DAY_PATTERNS = {
+    "YYYY-MM-DD": r"(?P<y>[0-9]{4})-(?P<m>[0-9]{2})-(?P<d>[0-9]{2})",
+    "DD/MM/YYYY": r"(?P<d>[0-9]{1,2})/(?P<m>[0-9]{1,2})/(?P<y>[0-9]{4})",
+    "MM/DD/YYYY": r"(?P<m>[0-9]{1,2})/(?P<d>[0-9]{1,2})/(?P<y>[0-9]{4})",
+}
+_TIME_PATTERNS = {"": "", " HH:MM": r" [0-9]{1,2}:[0-9]{2}", " HH:MM:SS": r" [0-9]{1,2}:[0-9]{2}:[0-9]{2}"}
+DATE_FORMATS: dict[str, re.Pattern[str]] = {
+    f"{day}{time}": re.compile(day_pattern + time_pattern)
+    for day, day_pattern in _DAY_PATTERNS.items()
+    for time, time_pattern in _TIME_PATTERNS.items()
+}
+DATE_FORMATS["YYYY-MM-DDTHH:MM:SS"] = re.compile(
+    _DAY_PATTERNS["YYYY-MM-DD"] + r"T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
+)
+GROUPED_DECIMAL = re.compile(r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?")
+
+
+def _ref(source: str, source_file: str, source_row: int) -> str:
+    """crm:14 under the three-file contract; crm/hubspot_contacts.csv:14 in an engagement."""
+    return f"{source}/{source_file}:{source_row}" if source_file else f"{source}:{source_row}"
+
+
+@dataclass(frozen=True)
+class FileSpec:
+    """How to read one export: which column holds each field and how its values are written.
+
+    A spec without a label is the plain three-file contract: canonical column names,
+    YYYY-MM-DD dates and plain decimals, with the contract's original messages.
+    """
+
+    source: str
+    path: Path
+    label: str
+    columns: dict[str, str]
+    fixed: dict[str, str]
+    date_format: str = "YYYY-MM-DD"
+    thousands_separator: str = ""
+    currency_label: str = ""
+    uppercase: frozenset[str] = frozenset()
+    # Fields this file must supply; empty means the three-file contract's fields.
+    fields: tuple[str, ...] = ()
+    # Amounts are written in this currency and converted at the declared rate.
+    currency: str = "AED"
+    aed_per_unit: str = "1"
+    rate_source: str = ""
+    refunds: str = "reject"
+
+    @property
+    def name(self) -> str:
+        return self.label or self.path.name
+
+    @property
+    def required(self) -> tuple[str, ...]:
+        return self.fields or CANONICAL_FIELDS[self.source]
+
+    def read_text(self, row: dict[str, Any], field: str) -> str:
+        value = self.fixed[field] if field in self.fixed else _text(row, self.columns[field])
+        return value.upper() if field in self.uppercase else value
+
+    def read_date(self, row: dict[str, Any], field: str) -> date:
+        if not self.label:
+            return _parse_date(row.get(self.columns[field]), field)
+        match = DATE_FORMATS[self.date_format].fullmatch(self.read_text(row, field))
+        try:
+            if match is None:
+                raise ValueError(field)
+            return date(int(match["y"]), int(match["m"]), int(match["d"]))
+        except ValueError as exc:
+            raise ValueError(f"{field} does not match the declared format {self.date_format}") from exc
+
+    def read_amount(self, row: dict[str, Any], field: str) -> Decimal:
+        if not self.label:
+            return _parse_money(row.get(self.columns[field]), field)
+        text = self.read_text(row, field)
+        if self.currency_label:
+            if text.startswith(self.currency_label):
+                text = text[len(self.currency_label):].lstrip()
+            elif text.endswith(self.currency_label):
+                text = text[: -len(self.currency_label)].rstrip()
+        negative = False
+        if len(text) >= 3 and text[0] == "(" and text[-1] == ")":
+            text, negative = text[1:-1].strip(), True
+        elif text.startswith("-"):
+            text, negative = text[1:].lstrip(), True
+        problem = f"{field} is not an amount in the declared format ({self.amount_format})"
+        if negative and self.refunds != "negative_values":
+            raise ValueError(problem)
+        if self.thousands_separator:
+            if not GROUPED_DECIMAL.fullmatch(text):
+                raise ValueError(problem)
+            text = text.replace(self.thousands_separator, "")
+        if not PLAIN_DECIMAL.fullmatch(text):
+            raise ValueError(problem)
+        if len(text.split(".")[0]) > MAX_INTEGER_DIGITS:
+            raise ValueError(f"{field} is too large to represent exactly")
+        # Convert the amount as written, then round once to fils.
+        value = (Decimal(text) * Decimal(self.aed_per_unit)).quantize(MONEY, rounding=ROUND_HALF_UP)
+        if value == 0:
+            return Decimal("0.00")
+        return -value if negative or self.refunds == "whole_file" else value
+
+    @property
+    def amount_format(self) -> str:
+        parts = [
+            f"thousands separator '{self.thousands_separator}'" if self.thousands_separator else "no thousands separator"
+        ]
+        if self.currency_label:
+            parts.append(f"currency label {self.currency_label}")
+        if self.currency != "AED":
+            parts.append(f"{self.currency} converted at {self.aed_per_unit} AED per unit")
+        parts.append(
+            {
+                "reject": "no negative amounts",
+                "negative_values": "negative amounts are refunds",
+                "whole_file": "every row is a refund written as a positive amount",
+            }[self.refunds]
+        )
+        return ", ".join(parts)
+
+
+@dataclass(frozen=True)
+class Engagement:
+    """Every export to read and every interpretation declared for them."""
+
+    files: dict[str, tuple[FileSpec, ...]]
+    windows: tuple[int, ...]
+    channel_aliases: dict[str, str] = field(default_factory=dict)
+    name: str | None = None
+    data_origin: str | None = None
+    config_path: Path | None = None
+    config_fingerprint: str | None = None
+    # How revenue reaches a CRM record: through the lead, or through the customer.
+    revenue_join: str = "lead_id"
+    multiple_campaigns: str = "unattributed"
+
+    @property
+    def declared(self) -> bool:
+        return self.config_path is not None
+
+    @property
+    def declares_refunds(self) -> bool:
+        return any(spec.refunds != "reject" for spec in self.files["revenue"])
+
+    def describe(self) -> dict[str, Any] | None:
+        if not self.declared:
+            return None
+        return {
+            "name": self.name,
+            "data_origin": self.data_origin,
+            "config_fingerprint": self.config_fingerprint,
+            "attribution_windows_days": list(self.windows),
+            "channel_aliases": dict(sorted(self.channel_aliases.items())),
+            "revenue_join": self.revenue_join,
+            "multiple_campaigns": self.multiple_campaigns,
+            "files": [
+                {
+                    "source": spec.source,
+                    "file": spec.label,
+                    "columns": dict(spec.columns),
+                    "fixed": dict(spec.fixed),
+                    "date_format": spec.date_format,
+                    "thousands_separator": spec.thousands_separator,
+                    "currency_label": spec.currency_label,
+                    "currency": spec.currency,
+                    "aed_per_unit": spec.aed_per_unit,
+                    "rate_source": spec.rate_source,
+                    "refunds": spec.refunds,
+                    "uppercase": sorted(spec.uppercase),
+                }
+                for source in SOURCES
+                for spec in self.files[source]
+            ],
+        }
+
+
+def three_file_engagement(ads_path: str | Path, crm_path: str | Path, revenue_path: str | Path) -> Engagement:
+    paths = {"ads": ads_path, "crm": crm_path, "revenue": revenue_path}
+    return Engagement(
+        files={
+            source: (FileSpec(source, Path(paths[source]), "", {name: name for name in CANONICAL_FIELDS[source]}, {}),)
+            for source in SOURCES
+        },
+        windows=tuple(RULESET["attribution_windows_days"]),
+    )
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [key for key, _ in pairs]
+    repeated = sorted({key for key in keys if keys.count(key) > 1})
+    if repeated:
+        raise ValueError(f"duplicate keys: {', '.join(repeated)}")
+    return dict(pairs)
+
+
+def load_engagement(config_path: str | Path) -> Engagement:
+    """Read and strictly validate an engagement config. Nothing in it is guessed."""
+    path = Path(config_path)
+    try:
+        raw = path.read_bytes()
+        config = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys)
+    except OSError as exc:
+        raise InputContractError(f"cannot read {path.name} ({type(exc).__name__})") from exc
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise InputContractError(f"{path.name} is not valid JSON ({exc})") from exc
+
+    def fail(message: str) -> None:
+        raise InputContractError(f"{path.name}: {message}")
+
+    def is_text(value: Any) -> bool:
+        return isinstance(value, str) and bool(value) and value.strip() == value and "\n" not in value
+
+    def is_header(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip()) and "\n" not in value
+
+    if not isinstance(config, dict):
+        fail("the config must be a JSON object")
+    unknown = sorted(set(config) - CONFIG_KEYS)
+    if unknown:
+        fail(f"unknown keys: {', '.join(unknown)}")
+    if type(config.get("config_version")) is not int or config["config_version"] != 1:
+        fail("config_version must be 1")
+    if not is_text(config.get("engagement")) or len(config["engagement"]) > 120:
+        fail("engagement must be a name of 1 to 120 characters")
+    if config.get("data_origin") not in DATA_ORIGINS:
+        fail(f"data_origin must be one of {', '.join(DATA_ORIGINS)}")
+    windows = config.get("attribution_windows_days", RULESET["attribution_windows_days"])
+    if (
+        not isinstance(windows, list)
+        or not 1 <= len(windows) <= MAX_WINDOWS
+        or any(type(window) is not int or not 1 <= window <= 999 for window in windows)
+        or windows != sorted(set(windows))
+    ):
+        fail(f"attribution_windows_days must list 1 to {MAX_WINDOWS} increasing whole days between 1 and 999")
+    aliases = config.get("channel_aliases", {})
+    if not isinstance(aliases, dict) or not all(
+        is_text(key) and is_text(value) and "[" not in value and "]" not in value for key, value in aliases.items()
+    ):
+        fail("channel_aliases must map channel names to non-empty names without square brackets")
+    folded = {key.casefold(): value for key, value in aliases.items()}
+    if len(folded) != len(aliases):
+        fail("channel_aliases has names that differ only in letter case")
+    join = config.get("revenue_join", "lead_id")
+    if join not in REVENUE_JOINS:
+        fail("revenue_join must be lead_id or customer_id")
+    required_fields = CANONICAL_FIELDS if join == "lead_id" else CUSTOMER_JOIN_FIELDS
+    rule = config.get("multiple_campaigns", "unattributed")
+    if rule not in MULTIPLE_CAMPAIGN_RULES:
+        fail(f"multiple_campaigns must be one of {', '.join(MULTIPLE_CAMPAIGN_RULES)}")
+    if rule != "unattributed" and join != "customer_id":
+        fail("multiple_campaigns applies only with revenue_join customer_id; each lead has one campaign")
+    sources = config.get("sources")
+    if not isinstance(sources, dict) or set(sources) != set(SOURCES):
+        fail("sources must declare exactly ads, crm and revenue")
+
+    files: dict[str, tuple[FileSpec, ...]] = {}
+    for source in SOURCES:
+        fields = required_fields[source]
+        entries = sources[source]
+        if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_FILES_PER_SOURCE:
+            fail(f"sources.{source} must list 1 to {MAX_FILES_PER_SOURCE} files")
+        specs: list[FileSpec] = []
+        for index, entry in enumerate(entries):
+            where = f"sources.{source}[{index}]"
+            if not isinstance(entry, dict):
+                fail(f"{where} must be an object")
+            extra = sorted(set(entry) - FILE_KEYS)
+            if extra:
+                fail(f"{where} has unknown keys: {', '.join(extra)}")
+            label = entry.get("file")
+            if (
+                not is_text(label)
+                or any(mark in label for mark in ":\\|`")
+                or label.startswith("/")
+                or any(part in ("", ".", "..") for part in label.split("/"))
+            ):
+                fail(f"{where}.file must be a relative path inside the config's folder without ':', '\\', '|' or '`'")
+            if any(spec.label == label for spec in specs):
+                fail(f"{where}.file lists {label} twice")
+            file_path = path.parent / label
+            if not file_path.is_file():
+                fail(f"{where}.file {label} does not exist next to the config")
+            columns = entry.get("columns", {})
+            fixed = entry.get("fixed", {})
+            if not isinstance(columns, dict) or not all(is_header(value) for value in columns.values()):
+                fail(f"{where}.columns must map fields to column names")
+            if not isinstance(fixed, dict) or not all(
+                is_text(value) and "[" not in value and "]" not in value for value in fixed.values()
+            ):
+                fail(f"{where}.fixed must map fields to non-empty values without square brackets")
+            wrong = sorted((set(columns) - set(fields)) | (set(fixed) - set(FIXABLE_FIELDS[source])))
+            if wrong:
+                fail(f"{where} cannot declare {', '.join(wrong)} for the {source} export with revenue_join {join}")
+            unclear = sorted(set(columns) & set(fixed)) + [
+                name for name in fields if name not in columns and name not in fixed
+            ]
+            if unclear:
+                fail(f"{where} must give each field exactly one column or fixed value: {', '.join(unclear)}")
+            if len(set(columns.values())) != len(columns):
+                fail(f"{where}.columns maps two fields to the same column")
+            date_format = entry.get("date_format", "YYYY-MM-DD")
+            if date_format not in DATE_FORMATS:
+                fail(f"{where}.date_format must be one of {', '.join(DATE_FORMATS)}")
+            amounts = entry.get("amounts", {})
+            if not isinstance(amounts, dict) or set(amounts) - {"thousands_separator", "currency_label", "currency", "refunds"}:
+                fail(f"{where}.amounts may declare only thousands_separator, currency_label, currency and refunds")
+            if amounts and not AMOUNT_FIELDS[source]:
+                fail(f"{where}.amounts is not allowed: the {source} export has no amounts")
+            separator = amounts.get("thousands_separator", "")
+            if separator not in ("", ","):
+                fail(f"{where}.amounts.thousands_separator must be ','")
+            currency = amounts.get("currency", {})
+            if not isinstance(currency, dict) or set(currency) - {"code", "aed_per_unit", "rate_source"}:
+                fail(f"{where}.amounts.currency may declare only code, aed_per_unit and rate_source")
+            code = currency.get("code", "AED")
+            rate = currency.get("aed_per_unit", "1")
+            rate_source = currency.get("rate_source", "")
+            if not isinstance(code, str) or not CURRENCY_CODE.fullmatch(code):
+                fail(f"{where}.amounts.currency.code must be a three-letter code such as USD")
+            if code == "AED" and (rate != "1" or rate_source):
+                fail(f"{where}.amounts.currency: AED amounts take no conversion rate")
+            if code != "AED" and (
+                not isinstance(rate, str)
+                or not PLAIN_DECIMAL.fullmatch(rate)
+                or Decimal(rate) <= 0
+                or len(rate.split(".")[0]) > 6
+                or not is_text(rate_source)
+                or len(rate_source) > 200
+            ):
+                fail(
+                    f"{where}.amounts.currency needs aed_per_unit as a positive decimal in quotes, such as \"3.6725\", "
+                    "and a rate_source saying where the rate comes from"
+                )
+            currency_label = amounts.get("currency_label", "")
+            if currency_label not in ("", code):
+                fail(f"{where}.amounts.currency_label must be {code}, the declared currency")
+            refunds = amounts.get("refunds", "reject")
+            if refunds not in REFUND_MODES or (refunds != "reject" and source != "revenue"):
+                fail(f"{where}.amounts.refunds must be one of {', '.join(REFUND_MODES)}; only revenue exports hold refunds")
+            identifiers = [name for name in IDENTIFIER_FIELDS[source] if name in fields]
+            uppercase = entry.get("uppercase", [])
+            if (
+                not isinstance(uppercase, list)
+                or not all(isinstance(name, str) for name in uppercase)
+                or len(set(uppercase)) != len(uppercase)
+                or set(uppercase) - set(identifiers)
+            ):
+                fail(f"{where}.uppercase may list only {', '.join(identifiers)}")
+            specs.append(
+                FileSpec(
+                    source, file_path, label, dict(columns), dict(fixed), date_format, separator, currency_label,
+                    frozenset(uppercase), tuple(fields), code, rate, rate_source, refunds,
+                )
+            )
+        files[source] = tuple(specs)
+    return Engagement(
+        files, tuple(windows), folded, config["engagement"], config["data_origin"], path,
+        hashlib.sha256(raw).hexdigest(), join, rule,
+    )
+
+
+def ensure_outside_repository(paths: Iterable[str | Path], repository: Path) -> None:
+    """Client exports and outputs must never sit inside a code checkout, where one `git add` publishes them."""
+    if not ((repository / ".git").exists() or (repository / "pyproject.toml").exists()):
+        return
+    root = repository.resolve()
+    for candidate in paths:
+        resolved = Path(candidate).resolve()
+        if resolved == root or root in resolved.parents:
+            raise InputContractError(
+                f"client data must stay outside the code repository: {candidate} is inside {root}. "
+                "Keep each engagement in its own folder (see docs/engagements.md)."
+            )
+
+
+def _found_columns(fieldnames: list[str]) -> str:
+    if not fieldnames:
+        return "none"
+    shown = ", ".join(f"'{name}'" for name in fieldnames[:12])
+    return shown + (f" and {len(fieldnames) - 12} more" if len(fieldnames) > 12 else "")
+
+
+def _read_csv(spec: FileSpec) -> list[tuple[int, dict[str, Any]]]:
     """Data rows paired with the physical line on which each record starts.
 
     Lines count the header as line 1 and include blank lines and the extra lines
@@ -189,7 +634,7 @@ def _read_csv(path: Path, required: set[str]) -> list[tuple[int, dict[str, Any]]
     fieldnames: list[str] | None = None
     rows: list[tuple[int, dict[str, Any]]] = []
     try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        with spec.path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.reader(handle)
             previous_line = 0
             for record in reader:
@@ -205,14 +650,27 @@ def _read_csv(path: Path, required: set[str]) -> list[tuple[int, dict[str, Any]]
                     row[None] = record[len(fieldnames):]
                 rows.append((start_line, row))
     except UnicodeDecodeError as exc:
-        raise InputContractError(f"{path.name} is not UTF-8 text") from exc
+        raise InputContractError(f"{spec.name} is not UTF-8 text") from exc
     except csv.Error as exc:
-        raise InputContractError(f"{path.name} is not a readable CSV ({exc})") from exc
-    missing = required - set(fieldnames or [])
+        raise InputContractError(f"{spec.name} is not a readable CSV ({exc})") from exc
+    found = list(fieldnames or [])
+    needed = {name: spec.columns[name] for name in CANONICAL_FIELDS[spec.source] if name in spec.columns}
+    missing = [name for name, header in needed.items() if header not in found]
+    if missing and not spec.label:
+        raise InputContractError(
+            f"{spec.name} is missing required columns: {', '.join(sorted(missing))}. "
+            f"Found columns: {_found_columns(found)}. "
+            "Exports with other column names or formats need an engagement config (--config)."
+        )
     if missing:
         raise InputContractError(
-            f"{path.name} is missing required columns: {', '.join(sorted(missing))}"
+            f"{spec.name} is missing "
+            + ", ".join(f"'{needed[name]}' (mapped to {name})" for name in missing)
+            + f". Found columns: {_found_columns(found)}."
         )
+    repeated = sorted({header for header in needed.values() if found.count(header) > 1})
+    if repeated:
+        raise InputContractError(f"{spec.name} has more than one column named {', '.join(repeated)}")
     return rows
 
 
@@ -250,10 +708,19 @@ def _dispose(
     status: str,
     reason: str = "",
     amount: Decimal | None = None,
+    source_file: str = "",
 ) -> None:
-    dispositions[f"{source}:{source_row}"] = RowDisposition(
-        source, source_row, record_id, status, reason, "" if amount is None else _money(amount)
+    dispositions[_ref(source, source_file, source_row)] = RowDisposition(
+        source, source_row, record_id, status, reason, "" if amount is None else _money(amount), source_file
     )
+
+
+def _readable_amount(spec: FileSpec, row: dict[str, Any], field: str) -> Decimal | None:
+    """A rejected row's amount when it can still be read, so an owner sees what the row holds."""
+    try:
+        return spec.read_amount(row, field)
+    except ValueError:
+        return None
 
 
 def _resolve_identity(
@@ -278,20 +745,26 @@ def _resolve_identity(
     kept: list[dict[str, Any]] = []
     conflicts: dict[str, list[str]] = {}
     for identifier, members in groups.items():
-        members.sort(key=lambda row: row["source_row"])
+        members.sort(key=lambda row: row["order"])
         amount = (lambda row: row[amount_field]) if amount_field else (lambda row: None)
         if len({signature(row) for row in members}) > 1:
             reason = conflict_reason(members)
             conflicts[identifier] = [row["source_ref"] for row in members]
             for row in members:
-                _dispose(dispositions, source, row["source_row"], identifier, CONFLICT, reason, amount(row))
+                _dispose(
+                    dispositions, source, row["source_row"], identifier, CONFLICT, reason, amount(row),
+                    row["source_file"],
+                )
             continue
         first, *repeats = members
         kept.append(first)
-        _dispose(dispositions, source, first["source_row"], identifier, ACCEPTED, "", amount(first))
+        _dispose(dispositions, source, first["source_row"], identifier, ACCEPTED, "", amount(first), first["source_file"])
         for row in repeats:
-            _dispose(dispositions, source, row["source_row"], identifier, DUPLICATE, duplicate_reason, amount(row))
-    kept.sort(key=lambda row: row["source_row"])
+            _dispose(
+                dispositions, source, row["source_row"], identifier, DUPLICATE, duplicate_reason, amount(row),
+                row["source_file"],
+            )
+    kept.sort(key=lambda row: row["order"])
     return kept, conflicts
 
 
@@ -307,24 +780,35 @@ class EvidenceEngine:
         revenue_path: str | Path,
         as_of: str | None = None,
     ) -> EvidenceReport:
+        return self.run_engagement(three_file_engagement(ads_path, crm_path, revenue_path), as_of)
+
+    def run_engagement(self, engagement: Engagement, as_of: str | None = None) -> EvidenceReport:
         if as_of is not None:
             try:
                 as_of = _parse_date(as_of, "as_of").isoformat()
             except ValueError as exc:
                 raise InputContractError(str(exc)) from exc
-        ads_path, crm_path, revenue_path = map(Path, (ads_path, crm_path, revenue_path))
-        ads_rows = _read_csv(ads_path, self.ADS_FIELDS)
-        crm_rows = _read_csv(crm_path, self.CRM_FIELDS)
-        revenue_rows = _read_csv(revenue_path, self.REVENUE_FIELDS)
+        raw = {
+            source: [
+                (spec, index, line, row)
+                for index, spec in enumerate(engagement.files[source])
+                for line, row in _read_csv(spec)
+            ]
+            for source in SOURCES
+        }
+        customer_join = engagement.revenue_join == "customer_id"
 
         dispositions: dict[str, RowDisposition] = {}
-        ads, conflicted_campaigns = self._validate_ads(ads_rows, dispositions)
-        crm, conflicting_leads = self._validate_crm(crm_rows, dispositions)
-        revenue = self._validate_revenue(revenue_rows, dispositions)
+        ads, conflicted_campaigns = self._validate_ads(raw["ads"], dispositions, engagement.channel_aliases)
+        crm, conflicting_leads = self._validate_crm(raw["crm"], dispositions, customer_join)
+        revenue = self._validate_revenue(raw["revenue"], dispositions, customer_join)
 
         spend_total = sum((row["spend"] for row in ads), Decimal("0"))
         revenue_total = sum((row["value"] for row in revenue), Decimal("0"))
-        leads_by_id = {row["lead_id"]: row for row in crm}
+        # Revenue reaches CRM records through its lead, or through every accepted lead of its customer.
+        leads_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in crm:
+            leads_by_key[row["customer_id"] if customer_join else row["lead_id"]].append(row)
         campaign_to_channel: dict[str, str] = {}
         spend_by_channel: dict[str, Decimal] = {}
         for row in ads:
@@ -337,13 +821,21 @@ class EvidenceEngine:
         unattributed: list[dict[str, Any]] = []
         conflicted_revenue: list[dict[str, Any]] = []
         for row in revenue:
-            lead = leads_by_id.get(row["lead_id"])
-            channel = campaign_to_channel.get(lead["campaign_id"]) if lead else None
-            if lead is None and row["lead_id"] in conflicting_leads:
-                reason = REASON_CONFLICTING_LEAD
+            leads = sorted(leads_by_key.get(row["link_id"], []), key=lambda item: (item["created_at"], item["order"]))
+            # All of a customer's accepted leads are join evidence; the declared rule picks the one credited.
+            lead = leads[0] if leads else None
+            if engagement.multiple_campaigns == "last_touch":
+                earlier = [item for item in leads if item["created_at"] <= row["date"]]
+                lead = earlier[-1] if earlier else lead
+            single_campaign = engagement.multiple_campaigns != "unattributed" or len({item["campaign_id"] for item in leads}) == 1
+            channel = campaign_to_channel.get(lead["campaign_id"]) if lead is not None and single_campaign else None
+            if lead is None and row["link_id"] in conflicting_leads:
+                reason = REASON_CONFLICTING_CUSTOMER if customer_join else REASON_CONFLICTING_LEAD
                 conflicted_revenue.append(row)
             elif lead is None:
-                reason = REASON_NO_LEAD
+                reason = REASON_NO_CUSTOMER if customer_join else REASON_NO_LEAD
+            elif not single_campaign:
+                reason = REASON_CUSTOMER_CAMPAIGNS
             elif channel is None and lead["campaign_id"] in conflicted_campaigns:
                 reason = REASON_CONFLICTING_CAMPAIGN
             elif channel is None:
@@ -356,7 +848,7 @@ class EvidenceEngine:
                 unattributed.append(row)
                 _dispose(
                     dispositions, "revenue", row["source_row"], row["transaction_id"],
-                    ACCEPTED_UNATTRIBUTED, reason, row["value"],
+                    ACCEPTED_UNATTRIBUTED, reason, row["value"], row["source_file"],
                 )
                 continue
             attributed.append(
@@ -365,7 +857,7 @@ class EvidenceEngine:
                     "campaign_id": lead["campaign_id"],
                     "channel": channel,
                     "delay_days": (row["date"] - lead["created_at"]).days,
-                    "crm_ref": lead["source_ref"],
+                    "crm_refs": [item["source_ref"] for item in leads],
                 }
             )
 
@@ -375,6 +867,14 @@ class EvidenceEngine:
         coverage = Decimal("0") if revenue_total == 0 else attributed_total / revenue_total
 
         attribution_assumption = ["CRM campaign is treated as the governing source attribution."]
+        if customer_join:
+            attribution_assumption.append("Revenue is joined to CRM leads through customer_id.")
+        if engagement.multiple_campaigns == "first_touch":
+            attribution_assumption.append("A customer with leads from several campaigns is credited to the earliest lead.")
+        elif engagement.multiple_campaigns == "last_touch":
+            attribution_assumption.append(
+                "A customer with leads from several campaigns is credited to the latest lead created by the transaction date."
+            )
         channel_rows: list[dict[str, Any]] = []
         channel_claims: list[Claim] = []
         channels = sorted(spend_by_channel)
@@ -390,7 +890,7 @@ class EvidenceEngine:
             channel_ads = [row["source_ref"] for row in ads if row["channel"] == channel]
             channel_attributed = [row for row in attributed if row["channel"] == channel]
             channel_revenue_refs = [row["source_ref"] for row in channel_attributed]
-            channel_joins = [row["crm_ref"] for row in channel_attributed]
+            channel_joins = [ref for row in channel_attributed for ref in row["crm_refs"]]
             channel_revenue = sum((row["value"] for row in channel_attributed), Decimal("0"))
             spend = spend_by_channel[channel]
             roas = Decimal("0") if spend == 0 else channel_revenue / spend
@@ -433,7 +933,7 @@ class EvidenceEngine:
 
         sensitivity: list[dict[str, Any]] = []
         window_claims: list[Claim] = []
-        for window in RULESET["attribution_windows_days"]:
+        for window in engagement.windows:
             ids = {"attributed": f"EV-WINATTR-{window:03d}", "excluded": f"EV-WINEXCL-{window:03d}"}
             inside = [row for row in attributed if row["delay_days"] <= window]
             outside = [row for row in attributed if row["delay_days"] > window]
@@ -453,14 +953,14 @@ class EvidenceEngine:
                         ids["attributed"], "window_attributed_revenue", _money(within), "AED",
                         "assumption-dependent",
                         f"Attributed revenue received within {window} days of lead creation.",
-                        {"summand": [row["source_ref"] for row in inside], "join": [row["crm_ref"] for row in inside]},
+                        {"summand": [row["source_ref"] for row in inside], "join": [ref for row in inside for ref in row["crm_refs"]]},
                         attribution_assumption, dimensions,
                     ),
                     _claim(
                         ids["excluded"], "window_excluded_delayed_revenue", _money(attributed_total - within),
                         "AED", "assumption-dependent",
                         f"Attributed revenue received more than {window} days after lead creation.",
-                        {"summand": [row["source_ref"] for row in outside], "join": [row["crm_ref"] for row in outside]},
+                        {"summand": [row["source_ref"] for row in outside], "join": [ref for row in outside for ref in row["crm_refs"]]},
                         attribution_assumption, dimensions,
                     ),
                 ]
@@ -469,7 +969,7 @@ class EvidenceEngine:
         ad_refs = [row["source_ref"] for row in ads]
         revenue_refs = [row["source_ref"] for row in revenue]
         attributed_refs = [row["source_ref"] for row in attributed]
-        attribution_joins = [row["crm_ref"] for row in attributed]
+        attribution_joins = [ref for row in attributed for ref in row["crm_refs"]]
         claims = [
             _claim(
                 "EV-SPEND-001",
@@ -497,7 +997,7 @@ class EvidenceEngine:
                 "assumption-dependent",
                 "Revenue connected deterministically through revenue.lead_id to CRM campaign_id and advertising channel.",
                 {"summand": attributed_refs, "join": attribution_joins},
-                ["CRM campaign is treated as the governing source attribution."],
+                attribution_assumption,
             ),
             _claim(
                 "EV-COVER-001",
@@ -531,21 +1031,34 @@ class EvidenceEngine:
                     "join": [
                         ref
                         for row in conflicted_revenue
-                        for ref in conflicting_leads[row["lead_id"]]
+                        for ref in conflicting_leads[row["link_id"]]
                     ],
                 },
             ),
         ]
+        refund_rows = [row for row in revenue if row["value"] < 0]
+        refunded_total = sum((row["value"] for row in refund_rows), Decimal("0"))
+        if engagement.declares_refunds:
+            claims.append(
+                _claim(
+                    "EV-REFUND-001",
+                    "refunded_revenue",
+                    _money(refunded_total),
+                    "AED",
+                    "reconciled",
+                    "Refunds and credit notes in the revenue exports, as negative amounts already netted into "
+                    "accepted revenue.",
+                    {"summand": [row["source_ref"] for row in refund_rows]},
+                )
+            )
         claims.extend(channel_claims)
         claims.extend(window_claims)
 
-        ordered = self._complete_dispositions(
-            dispositions, {"ads": ads_rows, "crm": crm_rows, "revenue": revenue_rows}
-        )
+        ordered = self._complete_dispositions(dispositions, raw)
         rejected = [
             RejectedRecord(
                 row.source, row.source_row, row.record_id,
-                SEVERITY_BY_STATUS[row.status], row.reason, row.status,
+                SEVERITY_BY_STATUS[row.status], row.reason, row.status, row.source_file,
             )
             for row in ordered
             if row.status != ACCEPTED
@@ -558,7 +1071,7 @@ class EvidenceEngine:
                     for status in STATUSES
                 },
             }
-            for source, rows in (("ads", ads_rows), ("crm", crm_rows), ("revenue", revenue_rows))
+            for source, rows in raw.items()
         }
 
         recommendation = self._recommend(
@@ -570,16 +1083,18 @@ class EvidenceEngine:
             sensitivity[0],
         )
         fingerprints = {
-            "ads": _fingerprint(ads_path),
-            "crm": _fingerprint(crm_path),
-            "revenue": _fingerprint(revenue_path),
+            (f"{source}/{spec.label}" if spec.label else source): _fingerprint(spec.path)
+            for source in SOURCES
+            for spec in engagement.files[source]
         }
         ruleset = json.loads(json.dumps(RULESET))
+        ruleset["attribution_windows_days"] = list(engagement.windows)
         ruleset_fingerprint = hashlib.sha256(
             json.dumps(ruleset, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         identity = "\n".join(
             [f"engine:{ENGINE_VERSION}", f"ruleset:{ruleset_fingerprint}", f"as_of:{as_of or ''}"]
+            + ([f"config:{engagement.config_fingerprint}"] if engagement.declared else [])
             + [f"{source}:{digest}" for source, digest in sorted(fingerprints.items())]
         )
         run_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
@@ -605,6 +1120,7 @@ class EvidenceEngine:
                 },
                 "row_status_counts": status_counts,
                 "rejected_or_uncertain_rows": len(rejected),
+                **({"refunded_revenue_aed": _money(refunded_total)} if engagement.declares_refunds else {}),
             },
             channels=channel_rows,
             sensitivity=sensitivity,
@@ -623,43 +1139,57 @@ class EvidenceEngine:
                 "reason": "authoritative deterministic report generated; optional AI narrative not requested",
                 "content": "",
             },
-            source_paths={"ads": str(ads_path), "crm": str(crm_path), "revenue": str(revenue_path)},
+            exceptions=_exceptions(ordered),
+            engagement=engagement.describe(),
+            source_paths=(
+                {"config": str(engagement.config_path)}
+                if engagement.declared
+                else {source: str(engagement.files[source][0].path) for source in SOURCES}
+            ),
         )
 
     @staticmethod
     def _complete_dispositions(
         dispositions: dict[str, RowDisposition],
-        inputs: dict[str, list[tuple[int, dict[str, str]]]],
+        inputs: dict[str, list[tuple[FileSpec, int, int, dict[str, Any]]]],
     ) -> list[RowDisposition]:
         """Every input row must have exactly one status; a gap is an engine defect."""
-        expected = {f"{source}:{row_number}" for source, rows in inputs.items() for row_number, _ in rows}
+        expected = {_ref(source, spec.label, line) for source, rows in inputs.items() for spec, _, line, _ in rows}
         missing = expected - set(dispositions)
         unexpected = set(dispositions) - expected
         if missing or unexpected:
             raise RuntimeError(
                 f"row disposition invariant violated; missing={sorted(missing)} unexpected={sorted(unexpected)}"
             )
+        file_order = {(source, spec.label): index for source, rows in inputs.items() for spec, index, _, _ in rows}
         return sorted(
-            dispositions.values(), key=lambda row: (SOURCE_ORDER[row.source], row.source_row)
+            dispositions.values(),
+            key=lambda row: (SOURCE_ORDER[row.source], file_order.get((row.source, row.source_file), 0), row.source_row),
         )
 
     @staticmethod
     def _validate_ads(
-        rows: Iterable[tuple[int, dict[str, str]]], dispositions: dict[str, RowDisposition]
+        rows: Iterable[tuple[FileSpec, int, int, dict[str, Any]]],
+        dispositions: dict[str, RowDisposition],
+        aliases: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], set[str]]:
+        aliases = aliases or {}
         valid: list[dict[str, Any]] = []
-        for source_row, row in rows:
-            campaign_id = _text(row, "campaign_id")
-            channel = _text(row, "channel")
+        for spec, file_index, source_row, row in rows:
+            campaign_id = spec.read_text(row, "campaign_id")
+            channel = spec.read_text(row, "channel")
+            channel = aliases.get(channel.casefold(), channel)
             record_id = campaign_id or f"row-{source_row}"
             try:
                 parsed = {
-                    "date": _parse_date(row.get("date"), "date"),
+                    "date": spec.read_date(row, "date"),
                     "campaign_id": campaign_id,
                     "channel": channel,
-                    "spend": _parse_money(row.get("spend_aed"), "spend_aed"),
+                    "spend": spec.read_amount(row, "spend_aed"),
                     "source_row": source_row,
-                    "source_ref": f"ads:{source_row}",
+                    "source_file": spec.label,
+                    "source_ref": _ref("ads", spec.label, source_row),
+                    "order": (file_index, source_row),
                 }
                 if not campaign_id or not channel:
                     raise ValueError("campaign_id and channel are required")
@@ -667,7 +1197,10 @@ class EvidenceEngine:
                     # Labels reach the narrative gate; a bracket could imitate a citation.
                     raise ValueError("campaign_id and channel must not contain square brackets")
             except ValueError as exc:
-                _dispose(dispositions, "ads", source_row, record_id, REJECTED, str(exc))
+                _dispose(
+                    dispositions, "ads", source_row, record_id, REJECTED, str(exc),
+                    _readable_amount(spec, row, "spend_aed"), spec.label,
+                )
                 continue
             valid.append(parsed)
 
@@ -682,92 +1215,121 @@ class EvidenceEngine:
             if row["campaign_id"] in conflicted:
                 _dispose(
                     dispositions, "ads", row["source_row"], row["campaign_id"], CONFLICT,
-                    "campaign_id maps to conflicting channels", row["spend"],
+                    "campaign_id maps to conflicting channels", row["spend"], row["source_file"],
                 )
                 continue
             signature = (row["date"], row["campaign_id"], row["channel"], row["spend"])
             if signature in seen:
                 _dispose(
                     dispositions, "ads", row["source_row"], row["campaign_id"], DUPLICATE,
-                    "exact duplicate advertising row", row["spend"],
+                    "exact duplicate advertising row", row["spend"], row["source_file"],
                 )
                 continue
             seen.add(signature)
             accepted.append(row)
-            _dispose(dispositions, "ads", row["source_row"], row["campaign_id"], ACCEPTED, "", row["spend"])
+            _dispose(
+                dispositions, "ads", row["source_row"], row["campaign_id"], ACCEPTED, "", row["spend"], row["source_file"]
+            )
         return accepted, conflicted
 
     @staticmethod
     def _validate_crm(
-        rows: Iterable[tuple[int, dict[str, str]]], dispositions: dict[str, RowDisposition]
+        rows: Iterable[tuple[FileSpec, int, int, dict[str, Any]]],
+        dispositions: dict[str, RowDisposition],
+        customer_join: bool = False,
     ) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+        """Accepted leads, and the refs of conflicting CRM rows keyed by the revenue join key."""
         valid: list[dict[str, Any]] = []
-        for source_row, row in rows:
-            lead_id = _text(row, "lead_id")
-            campaign_id = _text(row, "campaign_id")
+        for spec, file_index, source_row, row in rows:
+            lead_id = spec.read_text(row, "lead_id")
+            campaign_id = spec.read_text(row, "campaign_id")
+            customer_id = spec.read_text(row, "customer_id") if customer_join else ""
             record_id = lead_id or f"row-{source_row}"
             try:
                 if not lead_id or not campaign_id:
                     raise ValueError("lead_id and campaign_id are required")
+                if customer_join and not customer_id:
+                    raise ValueError("customer_id is required")
                 parsed = {
                     "lead_id": lead_id,
                     "campaign_id": campaign_id,
-                    "created_at": _parse_date(row.get("created_at"), "created_at"),
-                    "status": _text(row, "status").lower(),
+                    "customer_id": customer_id,
+                    "created_at": spec.read_date(row, "created_at"),
+                    "status": spec.read_text(row, "status").lower(),
                     "source_row": source_row,
-                    "source_ref": f"crm:{source_row}",
+                    "source_file": spec.label,
+                    "source_ref": _ref("crm", spec.label, source_row),
+                    "order": (file_index, source_row),
                 }
                 if not parsed["status"]:
                     raise ValueError("status is required")
             except ValueError as exc:
-                _dispose(dispositions, "crm", source_row, record_id, REJECTED, str(exc))
+                _dispose(dispositions, "crm", source_row, record_id, REJECTED, str(exc), source_file=spec.label)
                 continue
             valid.append(parsed)
 
         def conflict_reason(members: list[dict[str, Any]]) -> str:
             if len({row["campaign_id"] for row in members}) > 1:
                 return "lead_id has conflicting campaign attribution"
+            if len({row["customer_id"] for row in members}) > 1:
+                return "lead_id has conflicting customer_id values"
             return "lead_id has conflicting created_at or status values"
 
-        return _resolve_identity(
+        accepted, conflicts = _resolve_identity(
             valid,
             key="lead_id",
-            signature=lambda row: (row["campaign_id"], row["created_at"], row["status"]),
+            signature=lambda row: (row["campaign_id"], row["created_at"], row["status"], row["customer_id"]),
             dispositions=dispositions,
             source="crm",
             duplicate_reason="duplicate lead_id",
             conflict_reason=conflict_reason,
         )
+        if not customer_join:
+            return accepted, conflicts
+        by_ref = {row["source_ref"]: row for row in valid}
+        by_customer: dict[str, list[str]] = defaultdict(list)
+        for members in conflicts.values():
+            for ref in members:
+                by_customer[by_ref[ref]["customer_id"]].append(ref)
+        return accepted, dict(by_customer)
 
     @staticmethod
     def _validate_revenue(
-        rows: Iterable[tuple[int, dict[str, str]]], dispositions: dict[str, RowDisposition]
+        rows: Iterable[tuple[FileSpec, int, int, dict[str, Any]]],
+        dispositions: dict[str, RowDisposition],
+        customer_join: bool = False,
     ) -> list[dict[str, Any]]:
+        link = "customer_id" if customer_join else "lead_id"
         valid: list[dict[str, Any]] = []
-        for source_row, row in rows:
-            transaction_id = _text(row, "transaction_id")
-            lead_id = _text(row, "lead_id")
+        for spec, file_index, source_row, row in rows:
+            transaction_id = spec.read_text(row, "transaction_id")
+            link_id = spec.read_text(row, link)
             record_id = transaction_id or f"row-{source_row}"
             try:
-                if not transaction_id or not lead_id:
-                    raise ValueError("transaction_id and lead_id are required")
+                if not transaction_id or not link_id:
+                    raise ValueError(f"transaction_id and {link} are required")
                 parsed = {
                     "transaction_id": transaction_id,
-                    "lead_id": lead_id,
-                    "value": _parse_money(row.get("value_aed"), "value_aed"),
-                    "date": _parse_date(row.get("date"), "date"),
+                    "link_id": link_id,
+                    "value": spec.read_amount(row, "value_aed"),
+                    "date": spec.read_date(row, "date"),
                     "source_row": source_row,
-                    "source_ref": f"revenue:{source_row}",
+                    "source_file": spec.label,
+                    "source_ref": _ref("revenue", spec.label, source_row),
+                    "order": (file_index, source_row),
                 }
             except ValueError as exc:
-                _dispose(dispositions, "revenue", source_row, record_id, REJECTED, str(exc))
+                _dispose(
+                    dispositions, "revenue", source_row, record_id, REJECTED, str(exc),
+                    _readable_amount(spec, row, "value_aed"), spec.label,
+                )
                 continue
             valid.append(parsed)
 
         accepted, _ = _resolve_identity(
             valid,
             key="transaction_id",
-            signature=lambda row: (row["lead_id"], row["value"], row["date"]),
+            signature=lambda row: (row["link_id"], row["value"], row["date"]),
             dispositions=dispositions,
             source="revenue",
             duplicate_reason="duplicate transaction_id",
@@ -806,11 +1368,12 @@ class EvidenceEngine:
             )
         if Decimal(unattributed_aed) > 0:
             findings.append(
-                f"AED {unattributed_aed} of accepted revenue could not be assigned to a channel [EV-UNMATCH-001]."
+                f"AED {_grouped(unattributed_aed)} of accepted revenue could not be assigned to a channel [EV-UNMATCH-001]."
             )
         if Decimal(conflicted_aed) > 0:
             findings.append(
-                f"AED {conflicted_aed} of that revenue belongs to leads with contradictory CRM records [EV-CONFLICT-001]."
+                f"AED {_grouped(conflicted_aed)} of that revenue belongs to leads or customers with contradictory CRM "
+                "records [EV-CONFLICT-001]."
             )
             questions.append("Which campaign is correct for each lead with contradictory CRM records?")
         if excluded:
@@ -823,11 +1386,15 @@ class EvidenceEngine:
         delayed = shortest_window["excluded_delayed_revenue_aed"]
         if Decimal(delayed) > 0:
             findings.append(
-                f"AED {delayed} of attributed revenue arrived more than {window} days after lead creation "
+                f"AED {_grouped(delayed)} of attributed revenue arrived more than {window} days after lead creation "
                 f"[{shortest_window['evidence_ids']['excluded']}], so channel figures change with the attribution window."
             )
         if REASON_NO_LEAD in unattributed_reasons:
             questions.append("Can the CRM export include the leads referenced by unattributed transactions?")
+        if REASON_NO_CUSTOMER in unattributed_reasons:
+            questions.append("Can the CRM export include the customers referenced by unattributed transactions?")
+        if REASON_CUSTOMER_CAMPAIGNS in unattributed_reasons:
+            questions.append("Which campaign should be credited for customers whose leads came from more than one campaign?")
         if REASON_NO_CAMPAIGN in unattributed_reasons:
             questions.append("Can the advertising export include every campaign referenced by CRM leads?")
         if REASON_CHRONOLOGY in unattributed_reasons:
@@ -854,11 +1421,55 @@ class EvidenceEngine:
         }
 
 
+FIX_OWNER_BY_REASON = {
+    REASON_NO_CAMPAIGN: "Advertising account owner",
+    REASON_CONFLICTING_CAMPAIGN: "Advertising account owner",
+    REASON_NO_LEAD: "CRM owner",
+    REASON_CONFLICTING_LEAD: "CRM owner",
+    REASON_CHRONOLOGY: "CRM owner",
+    REASON_NO_CUSTOMER: "CRM owner",
+    REASON_CONFLICTING_CUSTOMER: "CRM owner",
+    REASON_CUSTOMER_CAMPAIGNS: "CRM owner",
+}
+FIX_OWNER_BY_SOURCE = {"ads": "Advertising account owner", "crm": "CRM owner", "revenue": "Finance or billing owner"}
+BRIEF_EXCEPTION_GROUPS = 10
+
+
+def _exceptions(dispositions: list[RowDisposition]) -> list[dict[str, Any]]:
+    """Rows that do not count in full, grouped by source, status and reason, largest amount first."""
+    groups: dict[tuple[str, str, str], list[RowDisposition]] = {}
+    for row in dispositions:
+        if row.status != ACCEPTED:
+            groups.setdefault((row.source, row.status, row.reason), []).append(row)
+    items = []
+    for (source, status, reason), rows in groups.items():
+        amounts = [Decimal(row.amount_aed) for row in rows if row.amount_aed]
+        items.append(
+            {
+                "source": source,
+                "status": status,
+                "reason": reason,
+                "rows": len(rows),
+                "amount_aed": _money(sum(amounts, Decimal("0"))),
+                "rows_without_amount": len(rows) - len(amounts),
+                "example_refs": [_ref(row.source, row.source_file, row.source_row) for row in rows[:3]],
+                "who_can_fix": FIX_OWNER_BY_REASON.get(reason, FIX_OWNER_BY_SOURCE[source]),
+            }
+        )
+    items.sort(
+        key=lambda item: (
+            -abs(Decimal(item["amount_aed"])), -item["rows"], SOURCE_ORDER[item["source"]], item["status"], item["reason"]
+        )
+    )
+    return items
+
+
 OUTPUT_NAMES = (
     "report.json",
     "lineage.csv",
     "row_dispositions.csv",
     "rejected_records.csv",
+    "exceptions.csv",
     "executive_brief.md",
     "report.html",
     "evaluation_results.json",
@@ -921,7 +1532,7 @@ def _write_files(report: EvidenceReport, output: Path) -> None:
 
     with (output / "rejected_records.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
-            handle, fieldnames=["source", "source_row", "record_id", "status", "severity", "reason"]
+            handle, fieldnames=["source", "source_row", "record_id", "status", "severity", "reason", "source_file"]
         )
         writer.writeheader()
         for row in report.rejected_records:
@@ -952,23 +1563,118 @@ def _write_files(report: EvidenceReport, output: Path) -> None:
     with (output / "row_dispositions.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["source", "source_row", "record_id", "status", "reason", "amount_aed", "supports"],
+            fieldnames=["source", "source_row", "record_id", "status", "reason", "amount_aed", "supports", "source_file"],
         )
         writer.writeheader()
         for row in report.dispositions:
             writer.writerow(
                 {
                     **asdict(row),
-                    "supports": ";".join(supports.get(f"{row.source}:{row.source_row}", [])),
+                    "supports": ";".join(supports.get(_ref(row.source, row.source_file, row.source_row), [])),
                 }
             )
+
+    with (output / "exceptions.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["rows", "amount_aed", "rows_without_amount", "status", "source", "reason", "who_can_fix", "example_refs"],
+        )
+        writer.writeheader()
+        for item in report.exceptions:
+            writer.writerow({**item, "example_refs": ";".join(item["example_refs"])})
 
     (output / "executive_brief.md").write_text(_brief(report), encoding="utf-8")
     (output / "report.html").write_text(_html(report), encoding="utf-8")
 
 
+def _exception_cell(item: dict[str, Any]) -> str:
+    if item["rows_without_amount"] == item["rows"]:
+        return "—"
+    extra = item["rows_without_amount"]
+    return _grouped(item["amount_aed"]) + (f" (+{extra} without a readable amount)" if extra else "")
+
+
+def _heading(report: EvidenceReport) -> tuple[str, str, str]:
+    """Title, evidence-status sentence and page tag, set by where the data came from."""
+    engagement = report.engagement
+    if engagement is None:
+        return (
+            "Executive Evidence Brief — Synthetic Demonstration",
+            "synthetic and reproducible; not a customer result, real-data deployment, reference, or paid validation.",
+            "SYNTHETIC DEMONSTRATION — NOT CUSTOMER VALIDATION",
+        )
+    if engagement["data_origin"] == "synthetic":
+        return (
+            f"Executive Evidence Brief — Synthetic Example: {engagement['name']}",
+            "synthetic exports read under the declared interpretations below; not a customer result, real-data "
+            "deployment, reference, or paid validation.",
+            "SYNTHETIC EXAMPLE — NOT CUSTOMER VALIDATION",
+        )
+    if engagement["data_origin"] == "public":
+        return (
+            f"Executive Evidence Brief — Public Data Rehearsal: {engagement['name']}",
+            "public data read under the declared interpretations below; not a customer result or paid validation.",
+            "PUBLIC DATA REHEARSAL — NOT CUSTOMER VALIDATION",
+        )
+    return (
+        f"Executive Evidence Brief — {engagement['name']}",
+        "computed from the client's exports under the declared interpretations below; it does not measure causation "
+        "or return on investment.",
+        "CLIENT EXPORTS — DETERMINISTIC EVIDENCE, NOT A CAUSAL ANALYSIS",
+    )
+
+
+def _interpretations(report: EvidenceReport) -> str:
+    engagement = report.engagement
+    if engagement is None:
+        return ""
+    lines = [
+        "## Declared interpretations",
+        "",
+        f"Config fingerprint `{engagement['config_fingerprint'][:16]}`. Revenue is joined to CRM records through "
+        f"`{engagement['revenue_join']}`."
+        + {
+            "unattributed": "",
+            "first_touch": " A customer with leads from several campaigns is credited to the earliest lead.",
+            "last_touch": " A customer with leads from several campaigns is credited to the latest lead created by the "
+            "transaction date.",
+        }[engagement["multiple_campaigns"]],
+    ]
+    if engagement["channel_aliases"]:
+        lines.append(
+            "Channel names read as: "
+            + "; ".join(f"'{key}' as {value}" for key, value in engagement["channel_aliases"].items())
+            + "."
+        )
+    lines.append("")
+    for item in engagement["files"]:
+        parts = [", ".join(f"{name} from '{header}'" for name, header in item["columns"].items())]
+        if item["fixed"]:
+            parts.append(", ".join(f"{name} fixed as {value}" for name, value in item["fixed"].items()))
+        parts.append(f"dates written {item['date_format']}")
+        if item["source"] != "crm":
+            amount = [
+                f"thousands separator '{item['thousands_separator']}'" if item["thousands_separator"] else "no thousands separator"
+            ]
+            if item["currency_label"]:
+                amount.append(f"currency label {item['currency_label']}")
+            if item["currency"] != "AED":
+                amount.append(f"{item['currency']} converted at {item['aed_per_unit']} AED per unit ({item['rate_source']})")
+            if item["refunds"] == "negative_values":
+                amount.append("negative amounts are refunds")
+            elif item["refunds"] == "whole_file":
+                amount.append("every row is a refund")
+            parts.append("amounts with " + ", ".join(amount))
+        if item["uppercase"]:
+            parts.append("upper-cased " + ", ".join(item["uppercase"]))
+        lines.append(f"- `{item['source']}/{item['file']}`: " + "; ".join(parts) + ".")
+    return "\n".join(lines) + "\n\n"
+
+
 def _brief(report: EvidenceReport) -> str:
     recommendation = report.recommendation
+    title, status_line, _ = _heading(report)
+    summary = report.summary
     as_of_line = f"**As of:** {report.as_of}  \n" if report.as_of else ""
     engine_line = (
         f"**Engine:** {report.engine_version} · **Rule set:** {report.ruleset['id']} "
@@ -981,20 +1687,44 @@ def _brief(report: EvidenceReport) -> str:
         f"{report.ruleset['coverage_threshold_basis']}."
     )
     channels = "\n".join(
-        f"- **{row['channel']}** — spend AED {row['spend_aed']} `[{row['evidence_ids']['spend']}]`; "
-        f"attributed revenue AED {row['attributed_revenue_aed']} `[{row['evidence_ids']['attributed_revenue']}]`; "
+        f"- **{row['channel']}** — spend AED {_grouped(row['spend_aed'])} `[{row['evidence_ids']['spend']}]`; "
+        f"attributed revenue AED {_grouped(row['attributed_revenue_aed'])} `[{row['evidence_ids']['attributed_revenue']}]`; "
         f"assumption-dependent ROAS {row['assumption_dependent_roas']}× `[{row['evidence_ids']['roas']}]`."
         for row in report.channels
-    )
+    ) or "- No channel has accepted spend."
     sensitivity = "\n".join(
-        f"- {row['attribution_window_days']} days: AED {row['attributed_revenue_aed']} attributed "
-        f"`[{row['evidence_ids']['attributed']}]`; AED {row['excluded_delayed_revenue_aed']} excluded "
+        f"- {row['attribution_window_days']} days: AED {_grouped(row['attributed_revenue_aed'])} attributed "
+        f"`[{row['evidence_ids']['attributed']}]`; AED {_grouped(row['excluded_delayed_revenue_aed'])} excluded "
         f"`[{row['evidence_ids']['excluded']}]`."
         for row in report.sensitivity
     )
-    return f"""# Executive Evidence Brief — Synthetic Demonstration
+    refund = next((claim for claim in report.claims if claim.evidence_id == "EV-REFUND-001"), None)
+    refund_line = (
+        f"- Refunds and credit notes, netted into revenue: **AED {_grouped(refund.value)}** `[EV-REFUND-001]`\n"
+        if refund
+        else ""
+    )
+    shown = report.exceptions[:BRIEF_EXCEPTION_GROUPS]
+    if shown:
+        table = "\n".join(
+            f"| {item['rows']} | {_exception_cell(item)} | {item['status']} | {item['reason'] or '—'} | "
+            f"{item['who_can_fix']} | " + ", ".join(f"`{ref}`" for ref in item["example_refs"]) + " |"
+            for item in shown
+        )
+        more = len(report.exceptions) - len(shown)
+        exceptions = (
+            "Rows excluded from every figure, or counted in revenue without a channel, grouped by reason. "
+            "Largest amounts first.\n\n"
+            "| Rows | AED in these rows | Status | Reason | Who can fix it | Examples |\n"
+            "|---:|---:|---|---|---|---|\n"
+            + table
+            + (f"\n\n{more} more groups are listed in exceptions.csv." if more else "")
+        )
+    else:
+        exceptions = "None: every row was accepted and attributed."
+    return f"""# {title}
 
-**Evidence status:** synthetic and reproducible; not a customer result, real-data deployment, reference, or paid validation.
+**Evidence status:** {status_line}
 **Run ID:** `{report.run_id}`
 **Decision status:** not approved; named budget-owner approval is required.
 {as_of_line}{engine_line}
@@ -1005,13 +1735,17 @@ What can the supplied advertising, CRM, and revenue exports defend about the nex
 
 ## Reconciled evidence
 
-- Accepted spend: **AED {report.summary['accepted_spend_aed']}** `[EV-SPEND-001]`
-- Accepted revenue: **AED {report.summary['accepted_revenue_aed']}** `[EV-REV-001]`
-- Attributed revenue: **AED {report.summary['attributed_revenue_aed']}** `[EV-ATTR-001]`
-- Attribution coverage: **{report.summary['attribution_coverage_percent']}%** `[EV-COVER-001]`
-- Unattributed or invalid revenue: **AED {report.summary['unattributed_or_invalid_revenue_aed']}** `[EV-UNMATCH-001]`
-- Revenue with conflicting lead attribution: **AED {report.summary['conflicting_lead_revenue_aed']}** `[EV-CONFLICT-001]`
-- Rejected or uncertain rows: **{report.summary['rejected_or_uncertain_rows']}**
+- Accepted spend: **AED {_grouped(summary['accepted_spend_aed'])}** `[EV-SPEND-001]`
+- Accepted revenue: **AED {_grouped(summary['accepted_revenue_aed'])}** `[EV-REV-001]`
+{refund_line}- Attributed revenue: **AED {_grouped(summary['attributed_revenue_aed'])}** `[EV-ATTR-001]`
+- Attribution coverage: **{summary['attribution_coverage_percent']}%** `[EV-COVER-001]`
+- Unattributed or invalid revenue: **AED {_grouped(summary['unattributed_or_invalid_revenue_aed'])}** `[EV-UNMATCH-001]`
+- Revenue with conflicting lead attribution: **AED {_grouped(summary['conflicting_lead_revenue_aed'])}** `[EV-CONFLICT-001]`
+- Rejected or uncertain rows: **{summary['rejected_or_uncertain_rows']}**
+
+## Exceptions to resolve
+
+{exceptions}
 
 ## Channel view
 
@@ -1023,7 +1757,7 @@ What can the supplied advertising, CRM, and revenue exports defend about the nex
 
 ## Recommendation
 
-**{report.recommendation['decision']}**
+**{recommendation['decision']}**
 
 Reason: {recommendation['reason']} This recommendation is graded **{recommendation['evidence_grade']}** and cannot be executed without human approval.
 
@@ -1037,7 +1771,7 @@ Reason: {recommendation['reason']} This recommendation is graded **{recommendati
 
 {threshold_line}
 
-## What the evidence cannot defend
+{_interpretations(report)}## What the evidence cannot defend
 
 - causal incrementality or a claim that advertising caused the revenue;
 - customer lifetime value beyond the supplied transaction period;
@@ -1052,13 +1786,22 @@ The accountable budget owner must choose **approve**, **reject**, or **request m
 
 def _html(report: EvidenceReport) -> str:
     # Source labels come from customer files; nothing from them is trusted as markup.
+    title, _, tag = _heading(report)
+    summary = report.summary
     rows = "".join(
         "<tr>"
-        f"<td>{escape(row['channel'])}</td><td>AED {escape(row['spend_aed'])}</td>"
-        f"<td>AED {escape(row['attributed_revenue_aed'])}</td>"
+        f"<td>{escape(row['channel'])}</td><td>AED {escape(_grouped(row['spend_aed']))}</td>"
+        f"<td>AED {escape(_grouped(row['attributed_revenue_aed']))}</td>"
         f"<td>{escape(row['assumption_dependent_roas'])}×</td>"
         f"<td>{escape(row['evidence_grade'])}</td></tr>"
         for row in report.channels
+    )
+    exception_rows = "".join(
+        "<tr>"
+        f"<td>{item['rows']}</td><td>{escape(_exception_cell(item))}</td><td>{escape(item['status'])}</td>"
+        f"<td>{escape(item['reason'])}</td><td>{escape(item['who_can_fix'])}</td>"
+        f"<td>{escape(', '.join(item['example_refs']))}</td></tr>"
+        for item in report.exceptions[:BRIEF_EXCEPTION_GROUPS]
     )
     recommendation = report.recommendation
     findings = "".join(f"<li>{escape(item)}</li>" for item in recommendation["findings"])
@@ -1070,19 +1813,20 @@ def _html(report: EvidenceReport) -> str:
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Revenue Decision Evidence — Synthetic Case</title>
+<title>{escape(title)}</title>
 <style>
-body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f4f7fb;color:#17233b}}main{{max-width:960px;margin:40px auto;padding:0 24px}}.tag{{display:inline-block;background:#fff1cf;color:#6f4d00;padding:7px 10px;border-radius:16px;font-weight:700}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin:22px 0}}.card,section{{background:white;border:1px solid #dbe4f0;border-radius:12px;padding:20px;box-shadow:0 4px 16px #18233a0a}}.metric{{font-size:28px;font-weight:800;color:#173f7a}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:10px;border-bottom:1px solid #e4e9f0}}.warn{{border-left:5px solid #d18a00}}.approval{{border-left:5px solid #b42318}}small{{color:#596579}}h1,h2{{color:#183e73}}</style>
+body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f4f7fb;color:#17233b}}main{{max-width:960px;margin:40px auto;padding:0 24px}}.tag{{display:inline-block;background:#fff1cf;color:#6f4d00;padding:7px 10px;border-radius:16px;font-weight:700}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin:22px 0}}.card,section{{background:white;border:1px solid #dbe4f0;border-radius:12px;padding:20px;box-shadow:0 4px 16px #18233a0a}}.metric{{font-size:28px;font-weight:800;color:#173f7a}}.scroll{{overflow-x:auto}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:10px;border-bottom:1px solid #e4e9f0}}.warn{{border-left:5px solid #d18a00}}.approval{{border-left:5px solid #b42318}}small{{color:#596579}}h1,h2{{color:#183e73}}</style>
 </head><body><main>
-<span class="tag">SYNTHETIC DEMONSTRATION — NOT CUSTOMER VALIDATION</span>
-<h1>Revenue Decision Evidence</h1><p>{identity}. Deterministic result; human approval required.</p>
+<span class="tag">{escape(tag)}</span>
+<h1>{escape(title)}</h1><p>{identity}. Deterministic result; human approval required.</p>
 <div class="grid">
-<div class="card"><small>Accepted spend</small><div class="metric">AED {report.summary['accepted_spend_aed']}</div><small>EV-SPEND-001</small></div>
-<div class="card"><small>Accepted revenue</small><div class="metric">AED {report.summary['accepted_revenue_aed']}</div><small>EV-REV-001</small></div>
-<div class="card"><small>Attribution coverage</small><div class="metric">{report.summary['attribution_coverage_percent']}%</div><small>EV-COVER-001</small></div>
-<div class="card"><small>Rows needing attention</small><div class="metric">{report.summary['rejected_or_uncertain_rows']}</div><small>Visible, never repaired silently</small></div>
+<div class="card"><small>Accepted spend</small><div class="metric">AED {escape(_grouped(summary['accepted_spend_aed']))}</div><small>EV-SPEND-001</small></div>
+<div class="card"><small>Accepted revenue</small><div class="metric">AED {escape(_grouped(summary['accepted_revenue_aed']))}</div><small>EV-REV-001</small></div>
+<div class="card"><small>Attribution coverage</small><div class="metric">{summary['attribution_coverage_percent']}%</div><small>EV-COVER-001</small></div>
+<div class="card"><small>Rows needing attention</small><div class="metric">{summary['rejected_or_uncertain_rows']}</div><small>Visible, never repaired silently</small></div>
 </div>
-<section><h2>Channel evidence</h2><table><thead><tr><th>Channel</th><th>Spend</th><th>Attributed revenue</th><th>ROAS</th><th>Grade</th></tr></thead><tbody>{rows}</tbody></table></section>
+<section><h2>Exceptions to resolve</h2><div class="scroll"><table><thead><tr><th>Rows</th><th>AED in these rows</th><th>Status</th><th>Reason</th><th>Who can fix it</th><th>Examples</th></tr></thead><tbody>{exception_rows or '<tr><td colspan="6">None</td></tr>'}</tbody></table></div></section>
+<section><h2>Channel evidence</h2><div class="scroll"><table><thead><tr><th>Channel</th><th>Spend</th><th>Attributed revenue</th><th>ROAS</th><th>Grade</th></tr></thead><tbody>{rows}</tbody></table></div></section>
 <section class="warn"><h2>Recommendation</h2><p><strong>{escape(recommendation['decision'])}</strong></p><p>{escape(recommendation['reason'])}</p><p>Evidence grade: {escape(recommendation['evidence_grade'])}.</p><h3>What the exports show</h3><ul>{findings or '<li>None.</li>'}</ul><h3>Questions that need answers before any budget decision</h3><ul>{questions}</ul><p><small>Coverage threshold {escape(report.ruleset['coverage_threshold_percent'])}%: {escape(report.ruleset['coverage_threshold_basis'])}.</small></p></section>
 <section class="approval"><h2>Approval gate</h2><p>Status: <strong>not approved</strong>. The accountable budget owner must approve, reject, or request more evidence. No action is automated.</p></section>
 </main></body></html>"""

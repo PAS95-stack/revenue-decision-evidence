@@ -8,8 +8,10 @@
 - A second, separate implementation that reconstructs every published figure
   from the raw exports; outputs are published only when the two agree.
 - A narrative gate that rejects any number not equal to the evidence it cites.
+- Real-shaped exports read through a declared engagement config, rehearsed on
+  25,900 public invoices with a synthetic CRM and advertising overlay.
 
-Verified with 103 tests on Python 3.13. CI runs the same suite on Python
+Verified with 127 tests on Python 3.13. CI runs the same suite on Python
 3.11–3.13 for every push.
 
 ## What it does not demonstrate
@@ -22,14 +24,20 @@ Verified with 103 tests on Python 3.13. CI runs the same suite on Python
 ## Known limitations
 
 **Data contract**
-- AED only; no currency conversion.
-- Refunds and credit notes cannot be represented: negative amounts are rejected.
+- Other currencies are converted at one fixed rate declared per file; there is no
+  dated exchange-rate table.
+- Refunds count only when declared, as negative amounts or a credit-note export.
+  Under the three-file contract negative amounts are rejected.
 - Advertising rows have no identifier, so two genuine rows with the same date,
   campaign, channel and amount count once. The excluded amount stays visible in
   `row_dispositions.csv`.
 - Spend and revenue periods are not aligned: channel ROAS divides all attributed
   revenue in the files by all accepted spend.
-- Column names are fixed. Real exports need a mapping step that is not built.
+- An engagement config maps columns and declares formats. It cannot compute a
+  column (quantity × price), mix date formats or currencies within one file, or
+  total a line-item revenue export.
+- Invoice status is not read: an unpaid invoice in the export counts as revenue.
+- Time of day and time zones are ignored; dates are taken as written.
 - Amounts too large to represent are rejected, but a sum close to Python's
   28-digit decimal precision is not guarded.
 
@@ -58,17 +66,22 @@ Verified with 103 tests on Python 3.13. CI runs the same suite on Python
   author. A code bug in either is caught; a misreading shared by both is not.
 - The checker verifies the figures and citations in findings, not the rest of
   their wording.
+- Exception groups use the engine's reason text. The checker verifies their rows,
+  amounts and examples, not the wording; "who can fix it" is a fixed mapping.
 
 **Scope**
 - Not a security review. The code has no access control, encryption or retention
   handling.
-- The 80% coverage threshold and the 30, 60 and 90-day windows are planning
-  choices, not validated values.
+- The 80% coverage threshold and the default 30, 60 and 90-day windows are
+  planning choices, not validated values; configured windows are the
+  engagement's choice.
+- With customer joins, first-touch and last-touch crediting are conventions, not
+  measurements; the default leaves such customers unattributed.
 
 ## Repeatability
 
-With the same input bytes, engine version, rule set and as-of date, every output
-file is byte-identical and `run_id` is the same. Changing any of them changes
+With the same input bytes, engine version, rule set, as-of date and engagement
+config, every output file is byte-identical and `run_id` is the same. Changing any of them changes
 `run_id`. Checked on Python 3.13 by comparing two runs and by a test that changes
 the clock. `.gitattributes` stops line-ending conversion of the committed inputs
 and outputs.
@@ -83,8 +96,9 @@ and outputs.
    valid; only its link to a campaign is doubtful. Rejecting it understated
    revenue.
 3. **Amounts and dates follow a strict contract.** `1e3`, `1,000` and `20260701`
-   can each be read more than one way, and refusing is safer than guessing. The
-   cost is that some exports need cleaning before a run.
+   can each be read more than one way, and refusing is safer than guessing. Real
+   exports declare their formats in an engagement config instead; the cost is
+   that each engagement must state them, and a wrong declaration rejects rows.
 4. **The report never recommends moving budget.** Attribution coverage and an
    approval step cannot show that spend caused revenue, so the output is findings
    and questions.
