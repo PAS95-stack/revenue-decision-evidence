@@ -167,12 +167,18 @@ checker. Its largest exception was the invoices without a customer ID, which hel
 AED 7,093,643.80. It publishes an 8.9 MB `report.json` beside a 27 MB `lineage.csv`
 holding all 274,801 lineage entries, and a 7 KB brief.
 
+The same dataset was also run as a line-item export, one row per order line:
+541,909 lines totalled into invoices, 550,298 rows in 27 seconds, again confirmed
+by the checker. It found 10,093 lines whose invoice and line identifier repeat
+with different values, and 4,793 exact duplicate lines.
+
 ## Size
 
-A run holds its rows in memory in both implementations. Measured here: 34,289 rows
-in about 7 seconds; 108,389 rows in about 63 seconds using 0.8 GB, writing a 28 KB
-`report.json` beside a 61 MB `lineage.csv`. For much larger exports, run a shorter
-period per engagement.
+A run holds its rows in memory in both implementations. Measured here, each run
+confirmed by the independent checker: 34,289 rows in about 7 seconds; 108,389 rows
+in 4.3 seconds using 0.9 GB; 550,298 rows in 27 seconds using 4.7 GB, writing a
+28 KB `report.json` beside a 384 MB `lineage.csv`. Around half a million rows needs
+roughly 5 GB of memory; beyond that, run a shorter period per engagement.
 
 ## What a config cannot express
 

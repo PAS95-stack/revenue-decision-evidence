@@ -82,13 +82,15 @@ Verified with 138 tests on Python 3.13. CI runs the same suite on Python
   amounts and examples, not the wording; "who can fix it" is a fixed mapping.
 
 **Size**
-- Measured on this machine: 34,289 rows in about 7 seconds, and 108,389 rows in
-  about 63 seconds using 0.8 GB of memory. Both the engine and the checker hold a
-  run in memory, so time and memory grow with the number of rows; expect minutes
-  and several gigabytes beyond a few hundred thousand rows, and split a large
-  period into shorter engagements if that matters.
-- `lineage.csv` is the large file: 61 MB at 108,389 rows, because every figure
-  names every row behind it.
+- Measured on this machine, each run checked by the independent reconstruction:
+  34,289 rows in about 7 seconds; 108,389 rows in 4.3 seconds using 0.9 GB;
+  550,298 rows in 27 seconds using 4.7 GB.
+- Both the engine and the checker hold a run in memory, so memory grows with the
+  number of rows. Around half a million rows needs roughly 5 GB; beyond that,
+  run a shorter period per engagement.
+- `lineage.csv` is the large file, because every figure names every row behind
+  it: 384 MB for 3.9 million lineage entries at 550,298 rows, beside a 28 KB
+  `report.json`.
 
 **Scope**
 - Not a security review. The code has no access control, encryption or retention

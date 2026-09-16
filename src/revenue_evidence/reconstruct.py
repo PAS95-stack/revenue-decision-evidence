@@ -32,6 +32,7 @@ import io
 import json
 import re
 import sys
+from collections import Counter
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
@@ -853,7 +854,8 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
 
         dispositions = _read_csv_output(output / "row_dispositions.csv")
         seen_refs = [_ref(row["source"], row.get("source_file", ""), row["source_row"]) for row in dispositions]
-        duplicated = {ref for ref in seen_refs if seen_refs.count(ref) > 1}
+        # Counted once, not scanned per row: a real export has hundreds of thousands of rows.
+        duplicated = {ref for ref, times in Counter(seen_refs).items() if times > 1}
         if duplicated:
             fail("row_dispositions", f"rows listed more than once: {_limited(duplicated)}")
         missing = set(expected["status"]) - set(seen_refs)
