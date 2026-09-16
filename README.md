@@ -37,8 +37,9 @@ or evidence of paid validation.
     rather than leads, a field filled from a second export that shares a key, and
     the attribution windows to report.
 
-  `propose` drafts the config from the exports themselves and marks what only a
-  person can decide. See [`docs/engagements.md`](docs/engagements.md).
+  `propose` drafts the config from the exports themselves — including how files
+  that split one record join, with the evidence for each join — and marks what only
+  a person can decide. See [`docs/engagements.md`](docs/engagements.md).
 - **Publishes only what an independent check reproduces.**
   `src/revenue_evidence/reconstruct.py` re-derives every row status and figure
   from the raw CSVs without using the engine's code. If it disagrees, or an

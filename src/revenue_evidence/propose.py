@@ -17,7 +17,8 @@ from __future__ import annotations
 import csv
 import json
 import re
-from dataclasses import dataclass, field
+from itertools import combinations
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from .engine import (
     FileSpec,
     numeric_order,
 )
+from .joins import Join, Table, discover
 
 # Characters that belong to a written number, so anything else beside it is a label.
 NUMBER_CHARACTERS = "0123456789.,-() "
@@ -327,7 +329,20 @@ def _overlap(left: list[str], right: list[str]) -> float:
     return len(values & {value for value in right if value}) / len(values) if values else 0.0
 
 
-def _map_columns(export: Export, fields: tuple[str, ...], excluded: tuple[str, ...] = ()) -> None:
+WEAK_DATE_WORDS = frozenset({"ship", "shipping", "shipped", "delivery", "delivered", "carrier", "estimated",
+                             "limit", "due", "expiry", "expires", "approved"})
+# The fields without which an export cannot stand as that source at all.
+CORE_FIELDS = {"ads": ("date", "campaign_id", "spend_aed"), "crm": ("lead_id", "campaign_id", "created_at"),
+               "revenue": ("transaction_id", "value_aed")}
+# The column identifying a record. A looked-up value must describe that record, so a sale's
+# date is looked up on the sale, never on the seller who made it.
+RECORD_KEYS = {"ads": "campaign_id", "crm": "lead_id", "revenue": "transaction_id"}
+
+
+def _assign(
+    headers: list[str], fields: tuple[str, ...], excluded: tuple[str, ...] = ()
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Give every header to the field that names it best, not to whichever field is checked first."""
     taken: set[str] = set(name for name in excluded if name)
     columns: dict[str, str] = {}
     evidence: dict[str, str] = {}
@@ -335,7 +350,7 @@ def _map_columns(export: Export, fields: tuple[str, ...], excluded: tuple[str, .
         (
             (*_matched(header, FIELD_WORDS[name]), name, index, header)
             for name in fields
-            for index, header in enumerate(export.headers)
+            for index, header in enumerate(headers)
         ),
         key=lambda item: (-item[0], item[3], item[4]),
     )
@@ -345,6 +360,12 @@ def _map_columns(export: Export, fields: tuple[str, ...], excluded: tuple[str, .
         taken.add(header)
         columns[name] = header
         evidence[name] = "header matched" if score >= EXACT else f"header contains '{word}'"
+    return columns, evidence
+
+
+def _map_columns(export: Export, fields: tuple[str, ...], excluded: tuple[str, ...] = ()) -> None:
+    columns, evidence = _assign(export.headers, fields, excluded)
+    taken = set(name for name in excluded if name) | set(columns.values())
     for name in fields:
         if name in columns:
             export.notes.append(f"| {name} | `{columns[name]}` | {evidence[name]} |")
@@ -381,6 +402,184 @@ def _repeats(export: Export, columns: dict[str, str]) -> bool:
     return len(seen) > len({value for value in seen if value})
 
 
+def _weak_date(header: str) -> bool:
+    """A fulfilment date — shipped, delivered, due — says when goods moved, not when a sale was made."""
+    return bool(set(_plain(header).split()) & WEAK_DATE_WORDS)
+
+
+def _parts(export: Export, source: str) -> tuple[str, ...]:
+    quantity, price = _named(export.headers, QUANTITY_WORDS), _named(export.headers, UNIT_PRICE_WORDS)
+    # A quantity beside a unit price are the parts of a total, never the total itself.
+    return (quantity, price) if quantity and price and AMOUNT_FIELDS[source] else ()
+
+
+def _covers_core(export: Export, source: str) -> bool:
+    columns, _ = _assign(export.headers, CUSTOMER_JOIN_FIELDS[source], _parts(export, source))
+    have = set(columns) | ({AMOUNT_FIELDS[source][0]} if _parts(export, source) else set())
+    return set(CORE_FIELDS[source]) <= have
+
+
+def _every_value(export: Export, header: str) -> set[str]:
+    """Every value a column holds across the whole file.
+
+    Sampled rows are not enough to say two exports share transactions: files sorted
+    differently can share every one while their first thousand rows share none.
+    """
+    values: set[str] = set()
+    with export.path.open("r", encoding=ENCODINGS[export.encoding], newline="") as handle:
+        position = None
+        for line, record in enumerate(csv.reader(handle, delimiter=DELIMITERS[export.delimiter]), start=1):
+            if line < export.header_row or not record:
+                continue
+            if position is None:
+                if header not in record:
+                    return values
+                position = record.index(header)
+                continue
+            if position < len(record) and record[position].strip():
+                values.add(record[position].strip())
+    return values
+
+
+def _roles(exports: list[Export]) -> tuple[dict[str, str], dict[str, str]]:
+    """Which exports stand as sources. The rest may still supply a missing field as a lookup.
+
+    Where no export of a source covers its core fields, every export classified as that
+    source stays one, so its gaps are reported rather than hidden. Two revenue exports
+    describing the same transactions are never both counted.
+    """
+    roles: dict[str, str] = {}
+    reasons: dict[str, str] = {}
+    for source in ("ads", "crm", "revenue"):
+        group = [export for export in exports if export.source == source]
+        primaries = [export for export in group if _covers_core(export, source)]
+        for export in group:
+            standing = not primaries or any(export is primary for primary in primaries)
+            roles[export.path.name] = "source" if standing else "secondary"
+    counted = [export for export in exports if export.source == "revenue" and roles[export.path.name] == "source"]
+    for first, second in combinations(counted, 2):
+        if roles[first.path.name] != "source" or roles[second.path.name] != "source":
+            continue
+        identifiers = []
+        for export in (first, second):
+            header = _assign(export.headers, ("transaction_id",))[0].get("transaction_id")
+            identifiers.append(_every_value(export, header) if header else set())
+        smaller = min(len(identifiers[0]), len(identifiers[1]))
+        if smaller and len(identifiers[0] & identifiers[1]) >= 0.5 * smaller:
+            keep, drop = sorted(
+                (first, second),
+                key=lambda export: (-len(_assign(export.headers, CUSTOMER_JOIN_FIELDS["revenue"] + ("lead_id",))[0]),
+                                    export.path.name),
+            )
+            roles[drop.path.name] = "duplicate"
+            reasons[drop.path.name] = (f"it describes the same transactions as `{keep.path.name}`, so counting both "
+                                       "would count revenue twice")
+    return roles, reasons
+
+
+def _link(source: Export, other: Export, joins: list[Join], profiles: dict) -> list:
+    """The ways `other` can give each row of `source` at most one row, strongest evidence first.
+
+    Either the source's column is contained in a key of `other` that never repeats, or a
+    column of `other`, itself never repeating, is contained in a key of the source: one
+    record split across two files, as closed deals extend leads.
+    """
+    options = []
+    for join in joins:
+        if join.child == source.path.name and join.parent == other.path.name:
+            options.append((tuple(zip(join.parent_columns, join.child_columns)), join))
+        elif join.child == other.path.name and join.parent == source.path.name and len(join.child_columns) == 1:
+            column = join.child_columns[0]
+            if any(profile.column == column and profile.unique for profile in profiles.get(other.path.name, [])):
+                options.append((tuple(zip(join.child_columns, join.parent_columns)), join))
+    options.sort(key=lambda option: (option[1].confidence != "check", -option[1].containment))
+    return options
+
+
+def _attach_lookup(
+    export: Export, exports: list[Export], roles: dict[str, str], joins: list[Join], profiles: dict,
+    required: dict[str, tuple[str, ...]],
+) -> None:
+    """Fill the fields this export lacks from a second export joined on the export's own record."""
+    columns = export.entry["columns"]
+    wanted = [name for name in required[export.source] if name not in columns]
+    if _parts(export, export.source):
+        wanted = [name for name in wanted if name not in AMOUNT_FIELDS[export.source]]
+    weak = export.source == "revenue" and "date" in columns and _weak_date(columns["date"])
+    if weak:
+        wanted.append("date")
+    if not wanted:
+        return
+    record = columns.get(RECORD_KEYS[export.source], "")
+    candidates = []
+    for other in exports:
+        if other is export or roles.get(other.path.name) not in ("secondary", "lookup"):
+            continue
+        for pairs, join in _link(export, other, joins, profiles):
+            if record not in {mine for _theirs, mine in pairs} and not set(wanted) <= {"campaign_id", "channel"}:
+                continue
+            headers = [header for header in other.headers if not ("date" in wanted and _weak_date(header))]
+            supplied, _ = _assign(headers, tuple(wanted), tuple(theirs for theirs, _mine in pairs))
+            if supplied:
+                rank = (join.confidence != "check", -len(supplied), -join.containment, other.path.name)
+                candidates.append((rank, other, pairs, join, supplied))
+            break
+    if not candidates:
+        return
+    candidates.sort(key=lambda candidate: candidate[0])
+    _rank, other, pairs, join, supplied = candidates[0]
+    replaced = columns.pop("date") if weak and "date" in supplied else ""
+    export.notes = [note for note in export.notes if not any(note.startswith(f"| {name} |") for name in supplied)]
+    export.entry["lookup"] = {"file": other.path.name, "match": dict(pairs), "columns": dict(supplied)}
+    keys = " and ".join(f"`{theirs}` = `{mine}`" for theirs, mine in pairs)
+    for name, header in supplied.items():
+        because = f"; `{replaced}` is a fulfilment date, not when the sale was made" if name == "date" and replaced else ""
+        export.notes.append(f"| {name} | `{other.path.name}`: `{header}` | looked up on {keys}{because} |")
+    mark = CHECK if join.confidence == "check" else NEEDS_YOU
+    export.notes.append(f"| lookup | `{other.path.name}` | {mark}: {'; '.join(join.reasons)} |")
+    for name in ("date", "created_at"):
+        if name in supplied:
+            formats, share, note = _date_declaration(other, supplied[name], name)
+            export.entry["date_format"] = formats[0] if len(formats) == 1 else formats
+            explained = note or f"{' or '.join(formats)} reads {share:.0%} of sampled values"
+            export.notes.append(f"| dates | `{other.path.name}`: `{supplied[name]}` | {explained} |")
+    for name in AMOUNT_FIELDS[export.source]:
+        if name in supplied:
+            declaration, share = _amount_declaration(replace(other, source=export.source), supplied[name], name)
+            if declaration:
+                export.entry["amounts"] = declaration
+            described = ", ".join(f"{key} {value}" for key, value in declaration.items()) or "plain decimals"
+            export.notes.append(f"| amounts | `{other.path.name}`: `{supplied[name]}` | {described} reads "
+                                f"{share:.0%} of sampled values |")
+    roles[other.path.name] = "lookup"
+
+
+def _fix_status(export: Export) -> None:
+    """A CRM export with no status column still says who is a lead: every row is one."""
+    if "status" in export.entry["columns"] or "status" in export.entry.get("lookup", {}).get("columns", {}):
+        return
+    if not _covers_core(export, "crm"):
+        return
+    export.entry.setdefault("fixed", {})["status"] = "lead"
+    export.notes = [note for note in export.notes if not note.startswith("| status |")]
+    export.notes.append(f"| status | fixed as lead | {CHECK}: no status column, so every row is read as a lead |")
+
+
+def _not_used(export: Export, exports: list[Export], roles: dict[str, str], reasons: dict[str, str],
+              joins: list[Join]) -> str:
+    name = export.path.name
+    if name in reasons:
+        return f"{CHECK}: {reasons[name]}"
+    used = {other.path.name for other in exports if roles.get(other.path.name) in ("source", "lookup")}
+    partners = sorted({join.parent if join.child == name else join.child for join in joins
+                       if (join.child == name and join.parent in used) or (join.parent == name and join.child in used)})
+    if partners:
+        return (f"{CHECK}: it joins to {', '.join(f'`{partner}`' for partner in partners)} but supplies no field "
+                "they are missing")
+    return (f"{NEEDS_YOU}: it covers no export's required fields and no column of it joins another export. "
+            "Confirm it belongs to this engagement, or remove it")
+
+
 def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[str, Any], str]:
     """Read every export in the folder and draft a config, with a report explaining it."""
     paths = sorted(
@@ -403,12 +602,35 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
              "reading but does not stop a run: values that do not match a declaration are refused and",
              "listed in the report rather than counted. Rename the draft to `engagement.json` when it is right.", ""]
 
-    crm = next((export for export in exports if export.source == "crm"), None)
-    revenue = next((export for export in exports if export.source == "revenue"), None)
+    # One record is often exported across files. Find how they join before deciding which
+    # export stands as a source and which only supplies fields to one.
+    roles, reasons = _roles(exports)
+    joins: list[Join] = []
+    profiles: dict = {}
+    if any(role != "source" for role in roles.values()):
+        tables = [Table(export.path.name, export.path, DELIMITERS[export.delimiter], ENCODINGS[export.encoding],
+                        export.header_row) for export in exports]
+        joins = discover(tables, profiles)
+    standing = [export for export in exports if roles[export.path.name] == "source"]
+
+    crm = next((export for export in standing if export.source == "crm"), None)
+    revenue = next((export for export in standing if export.source == "revenue"), None)
     join = "lead_id"
     if crm and revenue:
         _map_columns(crm, CUSTOMER_JOIN_FIELDS["crm"])
         customers = crm.values("customer_id")
+        lead_key = crm.entry["columns"].get("lead_id", "")
+        for other in ([] if customers else exports):
+            if roles[other.path.name] != "secondary":
+                continue
+            for pairs, _evidence in _link(crm, other, joins, profiles):
+                if lead_key in {mine for _theirs, mine in pairs}:
+                    header = _assign(other.headers, ("customer_id",), tuple(t for t, _m in pairs))[0].get("customer_id")
+                    if header:
+                        customers = [(row.get(header) or "").strip() for row in other.rows]
+                    break
+            if customers:
+                break
         if customers:
             by_customer = _overlap([(row.get(_named(revenue.headers, FIELD_WORDS["customer_id"])) or "").strip()
                                     for row in revenue.rows], customers)
@@ -422,7 +644,7 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
         crm.notes = []
     required = CANONICAL_FIELDS if join == "lead_id" else CUSTOMER_JOIN_FIELDS
 
-    for export in exports:
+    for export in standing:
         export.entry["file"] = export.path.name
         if export.header_row > 1:
             export.entry["header_row"] = export.header_row
@@ -431,10 +653,12 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
             export.entry["delimiter"] = export.delimiter
         if export.encoding != "utf-8":
             export.entry["encoding"] = export.encoding
-        quantity, price = _named(export.headers, QUANTITY_WORDS), _named(export.headers, UNIT_PRICE_WORDS)
-        # A quantity beside a unit price are the parts of a total, never the total itself.
-        parts = (quantity, price) if quantity and price and AMOUNT_FIELDS[export.source] else ()
+        parts = _parts(export, export.source)
         _map_columns(export, required[export.source], parts)
+        if joins:
+            _attach_lookup(export, exports, roles, joins, profiles, required)
+        if export.source == "crm":
+            _fix_status(export)
         for name_of_field, header in list(export.entry["columns"].items()):
             if name_of_field in ("date", "created_at"):
                 formats, share, note = _date_declaration(export, header, name_of_field)
@@ -450,7 +674,9 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
                 described = ", ".join(f"{key} {value}" for key, value in declaration.items()) or "plain decimals"
                 mark = "" if share > 0.95 else f" {CHECK}: values that do not match are refused and listed"
                 export.notes.append(f"| amounts | `{header}` | {described} reads {share:.0%} of sampled values{mark} |")
-        if AMOUNT_FIELDS[export.source] and not set(AMOUNT_FIELDS[export.source]) & set(export.entry["columns"]):
+        supplied = export.entry.get("lookup", {}).get("columns", {})
+        amount_fields = set(AMOUNT_FIELDS[export.source])
+        if amount_fields and not amount_fields & set(export.entry["columns"]) and not amount_fields & set(supplied):
             quantity, price = _named(export.headers, QUANTITY_WORDS), _named(export.headers, UNIT_PRICE_WORDS)
             if quantity and price:
                 amount_field = AMOUNT_FIELDS[export.source][0]
@@ -484,7 +710,7 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
                                     "the ones that are real revenue |")
 
     # One system writes meta-101 and another META-101: say so rather than losing the join.
-    ad_campaigns = [value for export in exports if export.source == "ads" for value in export.values("campaign_id")]
+    ad_campaigns = [value for export in standing if export.source == "ads" for value in export.values("campaign_id")]
     pairs = [(crm, "campaign_id", ad_campaigns, "the advertising exports"),
              (revenue, join, crm.values(join) if crm else [], "the CRM export")]
     for left, left_field, other, described in pairs:
@@ -501,7 +727,7 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
     # One export writing both 'Search' and 'search' would otherwise read as two channels,
     # and a campaign that maps to two channels is dropped as a conflict.
     spellings: dict[str, dict[str, int]] = {}
-    for export in exports:
+    for export in standing:
         if export.source == "ads":
             for value in export.values("channel"):
                 if value:
@@ -518,7 +744,7 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
                                "read as a single name so it is not counted twice |")
 
     sources: dict[str, list[dict[str, Any]]] = {"ads": [], "crm": [], "revenue": []}
-    for export in exports:
+    for export in standing:
         sources[export.source].append(export.entry)
         lines += [f"## `{export.source}/{export.path.name}`", "",
                   f"Read as {export.delimiter}-separated {export.encoding} text, {len(export.headers)} columns, "
@@ -530,6 +756,11 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
     if alias_notes:
         lines += ["## Channel names", "", "| Read as | Spellings found | How it was chosen |", "|---|---|---|",
                   *alias_notes, ""]
+    idle = [export for export in exports if roles[export.path.name] in ("secondary", "duplicate")]
+    if idle:
+        lines += ["## Not used", "", "| Export | Why |", "|---|---|",
+                  *(f"| `{export.path.name}` | {_not_used(export, exports, roles, reasons, joins)} |" for export in idle),
+                  ""]
     config = {
         "config_version": 1,
         "engagement": name,

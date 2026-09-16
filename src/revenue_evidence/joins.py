@@ -270,6 +270,16 @@ def profile_table(table: Table) -> list[Profile]:
     return profiles
 
 
+def _described_shape(profile: Profile) -> str:
+    if profile.kind == "integer":
+        return "whole numbers"
+    if profile.shape.startswith("hex"):
+        return f"{profile.shape[3:]}-character hexadecimal identifiers"
+    if profile.shape in ("", "mixed"):
+        return "codes of more than one shape"
+    return f"codes shaped like {profile.shape.replace('#', '0')}"
+
+
 def _dense_run(profile: Profile) -> bool:
     """Whether a column's integers fill most of their own span, as an auto-increment sequence does."""
     try:
@@ -367,6 +377,8 @@ def discover(
             reasons = [f"{share:.1%} of {len(child.distinct)} distinct values are in {parent.table}.{parent.column}",
                        f"{parent.table}.{parent.column} never repeats, so each row matches at most one"]
             reasons.append("the column names agree" if named else "the column names differ")
+            if not how:
+                reasons.append(f"both hold {_described_shape(parent)}")
             if few:
                 reasons.append(f"only {len(child.distinct)} distinct values, too few to rule out a match by chance")
             if how:

@@ -14,7 +14,7 @@
   closed deals and 112,650 real order lines joined through customers, with the
   advertising spend a declared overlay because that dataset publishes none.
 
-Verified with 169 tests on Python 3.13. CI runs the same suite on Python
+Verified with 173 tests on Python 3.13. CI runs the same suite on Python
 3.11–3.13 for every push.
 
 ## What it does not demonstrate
@@ -89,7 +89,13 @@ Verified with 169 tests on Python 3.13. CI runs the same suite on Python
   several and count its money more than once. Summing payments onto invoices, or
   picking the latest row of a history, is not attempted.
 - Joins through a bridge table (many-to-many) are out of scope.
-- `joins.py` is measured on its own; `propose` does not yet use it.
+- `propose` uses it. A file covering a source's core fields stands as that source;
+  one that does not may supply a missing field as a lookup, joined on the source's
+  own record, so a sale's date comes from the sale and never from the seller. A
+  revenue export describing the same transactions as another is left out rather
+  than counted twice, and a file that fits nowhere is listed. It drafts at most one
+  lookup per export, and does not check a looked-up identifier for differences in
+  letter case.
 
 **References**
 - Channel evidence IDs are numbered by sorted channel name within one run. In a

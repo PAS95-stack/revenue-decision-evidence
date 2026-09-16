@@ -103,6 +103,15 @@ files. Anything the data cannot settle — an exchange rate, a channel name, a d
 that reads both ways — is marked **needs you** rather than guessed. Check every
 line, then rename the draft to `engagement.json`.
 
+When one system exports a record across files — leads in one and closed deals in
+another, order lines in one and orders in another — the draft finds how they join from
+the values themselves. A file covering a source's required fields stands as that source;
+one that does not may supply a missing field as a `lookup`, joined on the source's own
+record, with the evidence: the share of values contained, that the key never repeats, and
+whether the names and the shape of the values agree. A second revenue export describing
+the same transactions is left out rather than counted twice, and a file that fits nowhere
+is listed under **Not used**.
+
 The draft is a starting point, not an authority: nothing in it changes how a run
 reads data, and a value that does not match its declaration is still rejected. The
 worked example is `examples/messy-exports/engagement.json`, which reads Meta,

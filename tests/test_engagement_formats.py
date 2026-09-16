@@ -1149,5 +1149,110 @@ class OneCommandTests(FormatTestCase):
         self.assertIn("need you before this can run", printed.getvalue())
         self.assertFalse((folder / "outputs" / "report.json").exists(), "nothing publishes on an unsettled draft")
 
+
+class SplitExportTests(FormatTestCase):
+    """One record exported across files: the second file becomes a lookup, never a second source."""
+
+    def split_exports(self, folder: Path) -> None:
+        write_csv(folder / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", f"C-{n}", "Search", "100.00"] for n in range(1, 4)])
+        write_csv(folder / "leads.csv", ["mql_id", "origin", "first_contact_date"],
+                  [[f"L-{n:03d}", f"C-{n % 3 + 1}", "2026-07-01"] for n in range(1, 61)])
+        write_csv(folder / "deals.csv", ["mql_id", "seller_id", "won_date"],
+                  [[f"L-{n:03d}", f"S-{n:03d}", "2026-07-03"] for n in range(1, 41)])
+        # The shipping limit falls before every lead was created, so using it would lose all attribution.
+        write_csv(folder / "items.csv", ["order_id", "order_item_id", "seller_id", "price", "shipping_limit_date"],
+                  [[f"O-{n:04d}", str(line), f"S-{n % 40 + 1:03d}", "10.00", "2026-06-20 10:00:00"]
+                   for n in range(1, 51) for line in (1, 2)])
+        write_csv(folder / "orders.csv", ["order_id", "order_purchase_timestamp", "order_status"],
+                  [[f"O-{n:04d}", "2026-07-10 09:00:00", "delivered"] for n in range(1, 51)])
+
+    def test_f40_the_draft_finds_both_lookups_with_their_evidence_and_runs(self):
+        from revenue_evidence.propose import unresolved, write_proposal
+
+        folder = self.root / "inputs"
+        folder.mkdir()
+        self.split_exports(folder)
+        draft, notes = write_proposal(folder, "Split exports", "synthetic")
+        config = json.loads(draft.read_text(encoding="utf-8"))
+        report = notes.read_text(encoding="utf-8")
+        self.assertEqual({source: [entry["file"] for entry in entries] for source, entries in config["sources"].items()},
+                         {"ads": ["ads.csv"], "crm": ["leads.csv"], "revenue": ["items.csv"]},
+                         "files that only supply fields are not sources")
+        self.assertEqual(config["revenue_join"], "customer_id")
+        crm, revenue = config["sources"]["crm"][0], config["sources"]["revenue"][0]
+        self.assertEqual(crm["lookup"], {"file": "deals.csv", "match": {"mql_id": "mql_id"},
+                                         "columns": {"customer_id": "seller_id"}})
+        self.assertEqual(crm["fixed"], {"status": "lead"})
+        self.assertEqual(revenue["lookup"], {"file": "orders.csv", "match": {"order_id": "order_id"},
+                                             "columns": {"date": "order_purchase_timestamp"}},
+                         "a sale's date comes from the sale, not the shipping limit or the seller's deal")
+        self.assertNotIn("date", revenue["columns"])
+        self.assertIn("100.0% of 40 distinct values are in leads.csv.mql_id", report)
+        self.assertIn("orders.csv.order_id never repeats", report)
+        self.assertEqual(unresolved(report), [])
+        (folder / "engagement.json").write_text(json.dumps(config), encoding="utf-8")
+        published = self.publish(folder / "engagement.json")
+        self.assertEqual(published.summary["accepted_revenue_aed"], "1000.00")
+        self.assertEqual(published.summary["attributed_revenue_aed"], "1000.00")
+
+    def test_f41_an_export_describing_the_same_sales_is_not_counted_twice(self):
+        from revenue_evidence.propose import advisory, propose, unresolved
+
+        folder = self.root / "inputs"
+        folder.mkdir()
+        write_csv(folder / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", "C-1", "Search", "100"]])
+        write_csv(folder / "contacts.csv", ["Record ID", "Create Date", "Lifecycle Stage", "UTM Campaign"],
+                  [[f"L-{n}", "2026-07-01", "customer", "C-1"] for n in range(1, 6)])
+        write_csv(folder / "invoices.csv", ["Invoice", "Reference", "Total", "Date"],
+                  [[f"T-{n}", f"L-{n}", "100.00", "2026-07-10"] for n in range(1, 6)])
+        write_csv(folder / "payments.csv", ["Invoice", "Amount Paid", "Paid On"],
+                  [[f"T-{n}", "100.00", "2026-07-11"] for n in range(1, 6)])
+        config, report = propose(folder, "Payments beside invoices", "synthetic")
+        self.assertEqual([entry["file"] for entry in config["sources"]["revenue"]], ["invoices.csv"])
+        self.assertIn("counting both would count revenue twice", report)
+        self.assertEqual(unresolved(report), [], "leaving the payments out needs no decision")
+        self.assertTrue(any("payments.csv" in line for line in advisory(report)))
+
+    def test_f43_the_same_sales_sorted_differently_are_still_counted_once(self):
+        from revenue_evidence.propose import propose
+
+        folder = self.root / "inputs"
+        folder.mkdir()
+        write_csv(folder / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", "C-1", "Search", "100"]])
+        write_csv(folder / "contacts.csv", ["Record ID", "Create Date", "Lifecycle Stage", "UTM Campaign"],
+                  [["L-1", "2026-07-01", "customer", "C-1"]])
+        invoices = [f"T-{n:04d}" for n in range(1, 2501)]
+        write_csv(folder / "invoices.csv", ["Invoice", "Reference", "Total", "Date"],
+                  [[invoice, "L-1", "10.00", "2026-07-10"] for invoice in invoices])
+        write_csv(folder / "payments.csv", ["Invoice", "Amount Paid", "Paid On"],
+                  [[invoice, "10.00", "2026-07-11"] for invoice in reversed(invoices)])
+        config, report = propose(folder, "Sorted differently", "synthetic")
+        self.assertEqual([entry["file"] for entry in config["sources"]["revenue"]], ["invoices.csv"],
+                         "the first thousand rows share no invoice; the files share all of them")
+        self.assertIn("counting both would count revenue twice", report)
+
+    def test_f42_one_command_reads_a_split_export_as_sources_and_lookups(self):
+        loader = importlib.util.spec_from_file_location("engagement_script", ROOT / "scripts" / "engagement.py")
+        script = importlib.util.module_from_spec(loader)
+        loader.loader.exec_module(script)
+        folder = self.root / "engagement"
+        arguments = ["ingest", str(folder), "--received-on", "2026-09-16", "--received-from", "Finance",
+                     "--origin", "synthetic"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(script.main(arguments, repository=ROOT), 0)
+        self.split_exports(folder / "inputs")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(script.main(arguments + ["--accept-draft"], repository=ROOT), 0)
+        report = json.loads((folder / "outputs" / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["summary"]["attributed_revenue_aed"], "1000.00")
+        self.assertIn("revenue/orders.csv", report["source_fingerprints"])
+        self.assertIn("crm/deals.csv", report["source_fingerprints"])
+        logged = (folder / "records" / "intake_log.csv").read_text(encoding="utf-8")
+        for name in ("deals.csv", "orders.csv"):
+            self.assertIn(name, logged, "a lookup file is recorded at intake like any export")
+
 if __name__ == "__main__":
     unittest.main()

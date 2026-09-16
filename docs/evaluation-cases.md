@@ -2,7 +2,7 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 169 tests, all passing on Python 3.13 on 16 September 2026, in about
+**Result:** 173 tests, all passing on Python 3.13 on 16 September 2026, in about
 three seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
@@ -181,6 +181,10 @@ minimum.
 | f37 | A second export fills a field through a shared key, is fingerprinted into `run_id`, and a row whose key it does not carry is refused and named rather than filled |
 | f38 | A key the second export repeats with identical values is used; one it repeats with different values makes each row pointing at it a conflict, excluded and listed; a blank key matches nothing; and reordering the second export's rows changes no status |
 | f39 | A lookup may match on two columns, the brief states its values are as the file stands now rather than on each row's date, and a missing lookup column is refused |
+| f40 | The draft reads leads and closed deals, and order lines and orders, as two sources each with a lookup, states the evidence for each join, dates a sale by its purchase rather than its shipping limit, and runs |
+| f41 | A payments export describing the same sales as the invoices is left out and listed, never counted as a second source of revenue |
+| f42 | One command reads a split export as sources and lookups, records the lookup files at intake and publishes |
+| f43 | Two exports of the same sales sorted differently are still counted once: sharing is judged on every value, not on the first thousand rows |
 
 ## Join discovery guards (`test_joins.py`)
 
