@@ -468,7 +468,8 @@ class FileSpec:
     reporting_time_zone: str = ""
     # A second export that carries fields this one does not, matched on a shared key.
     lookup_path: Path | None = None
-    lookup_match: tuple[str, str] = ("", "")
+    # One or two (column in the second export, column in this one) pairs.
+    lookup_match: tuple[tuple[str, str], ...] = ()
     lookup_columns: dict[str, str] = field(default_factory=dict)
     filter_column: str = ""
     filter_values: tuple[str, ...] = ()
@@ -715,7 +716,7 @@ class Engagement:
                     "lookup": (
                         {
                             "file": spec.lookup_path.name,
-                            "match": {spec.lookup_match[0]: spec.lookup_match[1]},
+                            "match": dict(spec.lookup_match),
                             "columns": dict(spec.lookup_columns),
                         }
                         if spec.lookup_path
@@ -899,7 +900,7 @@ def load_engagement(config_path: str | Path) -> Engagement:
                     or set(declared_lookup) != {"file", "match", "columns"}
                     or not is_text(declared_lookup.get("file"))
                     or any(mark in declared_lookup["file"] for mark in ":\\|`")
-                    or not isinstance(match, dict) or len(match) != 1
+                    or not isinstance(match, dict) or not 1 <= len(match) <= 2
                     or not all(is_header(key) and is_header(value) for key, value in match.items())
                     or not isinstance(taken, dict) or not taken
                     or not all(is_header(value) for value in taken.values())
@@ -913,7 +914,7 @@ def load_engagement(config_path: str | Path) -> Engagement:
                 if set(taken) & (set(columns) | set(fixed)):
                     fail(f"{where}.lookup cannot supply a field this export already declares: "
                          f"{', '.join(sorted(set(taken) & (set(columns) | set(fixed))))}")
-                lookup_match = next(iter(match.items()))
+                lookup_match = tuple(match.items())
                 lookup_columns = dict(taken)
             header_row = entry.get("header_row", 1)
             if not isinstance(header_row, int) or isinstance(header_row, bool) or not 1 <= header_row <= MAX_HEADER_ROW:
@@ -1113,28 +1114,52 @@ def _found_columns(fieldnames: list[str]) -> str:
 
 
 LOOKUP_PREFIX = "\x00lookup:"
+LOOKUP_CONFLICT = "\x00lookup-conflict"
 
 
 def _fill_from_lookup(spec: FileSpec, rows: list[tuple[int, dict[str, Any]]]) -> None:
     """Copy the declared columns of a second export onto every row that shares its key.
 
-    A row whose key is not in the second export keeps an empty value, so it is refused
-    and named by the same rules as a blank cell, never quietly filled.
+    The rule is the one every export follows here. A key repeated with identical values is
+    harmless; a key repeated with different values cannot be settled, so each row pointing
+    at it is marked a conflict, excluded and listed. File order never decides. Blank keys
+    never match, and a row whose key is absent keeps empty values, so it is refused and
+    named by the same rules as a blank cell.
     """
-    their_key, my_key = spec.lookup_match
+    their_keys = tuple(pair[0] for pair in spec.lookup_match)
+    my_keys = tuple(pair[1] for pair in spec.lookup_match)
+    headers = tuple(spec.lookup_columns.values())
     reader = replace(
         spec, path=spec.lookup_path, columns={}, fixed={}, fields=(), lookup_path=None, lookup_columns={},
-        filter_column="", filter_values=(), currency_column="", value_from=None,
+        lookup_match=(), filter_column="", filter_values=(), currency_column="", value_from=None,
     )
-    index: dict[str, dict[str, Any]] = {}
-    for _line, row in _read_csv(reader):
-        key = _text(row, their_key)
-        if key and key not in index:
-            index[key] = row
+    others = _read_csv(reader)
+    present = {name for _line, other in others[:50] for name in other if isinstance(name, str)}
+    absent = [column for column in (*their_keys, *headers) if others and column not in present]
+    if absent:
+        raise InputContractError(
+            f"{spec.lookup_path.name} is missing the declared column {', '.join(repr(c) for c in absent)}"
+        )
+    carried: dict[tuple[str, ...], tuple[str, ...]] = {}
+    disputed: set[tuple[str, ...]] = set()
+    for _line, other in others:
+        key = tuple(_text(other, column) for column in their_keys)
+        if not all(key):
+            continue
+        values = tuple(_text(other, header) for header in headers)
+        if carried.setdefault(key, values) != values:
+            disputed.add(key)
     for _line, row in rows:
-        found = index.get(_text(row, my_key), {})
-        for field_name, header in spec.lookup_columns.items():
-            row[LOOKUP_PREFIX + header] = _text(found, header) if found else ""
+        key = tuple(_text(row, column) for column in my_keys)
+        complete = all(key)
+        if complete and key in disputed:
+            row[LOOKUP_CONFLICT] = (
+                f"{spec.lookup_path.name} has more than one row for this key with different values, "
+                "so which is right cannot be decided"
+            )
+        values = carried.get(key) if complete and key not in disputed else None
+        for index, header in enumerate(headers):
+            row[LOOKUP_PREFIX + header] = values[index] if values else ""
 
 
 def _read_csv(spec: FileSpec) -> list[tuple[int, dict[str, Any]]]:
@@ -1729,6 +1754,12 @@ class EvidenceEngine:
                     spec.label,
                 )
                 continue
+            if LOOKUP_CONFLICT in row:
+                _dispose(
+                    dispositions, "ads", source_row, spec.read_text(row, "campaign_id") or f"row-{source_row}", CONFLICT,
+                    row[LOOKUP_CONFLICT], _readable_amount(spec, row, "spend_aed"), spec.label,
+                )
+                continue
             campaign_id = spec.read_text(row, "campaign_id")
             channel = spec.read_text(row, "channel")
             channel = aliases.get(channel.casefold(), channel)
@@ -1821,6 +1852,12 @@ class EvidenceEngine:
                     f"{spec.filter_column} is not one of the declared values", None, spec.label,
                 )
                 continue
+            if LOOKUP_CONFLICT in row:
+                _dispose(
+                    dispositions, "crm", source_row, spec.read_text(row, "lead_id") or f"row-{source_row}", CONFLICT,
+                    row[LOOKUP_CONFLICT], None, spec.label,
+                )
+                continue
             lead_id = spec.read_text(row, "lead_id")
             campaign_id = spec.read_text(row, "campaign_id")
             customer_id = spec.read_text(row, "customer_id") if customer_join else ""
@@ -1888,6 +1925,12 @@ class EvidenceEngine:
                     dispositions, "revenue", source_row, spec.read_text(row, "transaction_id") or f"row-{source_row}",
                     FILTERED, f"{spec.filter_column} is not one of the declared values",
                     _readable_amount(spec, row, "value_aed"), spec.label,
+                )
+                continue
+            if LOOKUP_CONFLICT in row:
+                _dispose(
+                    dispositions, "revenue", source_row, spec.read_text(row, "transaction_id") or f"row-{source_row}",
+                    CONFLICT, row[LOOKUP_CONFLICT], _readable_amount(spec, row, "value_aed"), spec.label,
                 )
                 continue
             transaction_id = spec.read_text(row, "transaction_id")
@@ -2413,6 +2456,12 @@ def _interpretations(report: EvidenceReport) -> str:
         parts.append("dates written " + " or ".join(item["date_formats"]))
         if item.get("time_zone"):
             parts.append(f"times written in {item['time_zone']}")
+        if item.get("lookup"):
+            carried = item["lookup"]
+            parts.append(
+                f"{', '.join(carried['columns'])} taken from {carried['file']} matched on "
+                f"{' and '.join(carried['match'])}, as that file stands now rather than as it stood on each row's date"
+            )
         if item.get("header_row", 1) > 1:
             parts.append(f"column names read from line {item['header_row']}")
         if item["time_zone_shift_hours"]:

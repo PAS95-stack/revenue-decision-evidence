@@ -160,6 +160,7 @@ AMOUNT = {"ads": ("spend_aed",), "crm": (), "revenue": ("value_aed",)}
 
 # A name no export can carry, so a looked-up value reads like any other column.
 LOOKUP_PREFIX = "\x00lookup:"
+LOOKUP_CONFLICT = "\x00lookup-conflict"
 
 
 def _included(row: dict, spec: dict) -> bool:
@@ -458,7 +459,7 @@ def _plain_spec(name: str, path) -> dict:
         "date_formats": ("YYYY-MM-DD",), "time_shift": 0, "value_from": None, "currency_column": "",
         "currency_rates": {}, "thousands_separator": "", "decimal": "point", "header_row": 1,
         "time_zone": "", "reporting_time_zone": "UTC",
-        "lookup_path": None, "lookup_match": ("", ""), "lookup_columns": {},
+        "lookup_path": None, "lookup_match": (), "lookup_columns": {},
         "currency_label": "", "currency": "AED",
         "aed_per_unit": "1", "rate_source": "", "refunds": "reject", "uppercase": set(), "required": REQUIRED[name],
         "filter_column": "", "filter_values": (), "delimiter": "comma", "encoding": "utf-8",
@@ -534,7 +535,7 @@ def _load_config(path) -> dict:
                     declared_lookup is not None
                     and set(declared_lookup) == {"file", "match", "columns"}
                     and isinstance(declared_lookup.get("file"), str) and declared_lookup["file"]
-                    and isinstance(declared_lookup.get("match"), dict) and len(declared_lookup["match"]) == 1
+                    and isinstance(declared_lookup.get("match"), dict) and 1 <= len(declared_lookup["match"]) <= 2
                     and all(isinstance(k, str) and isinstance(v, str) for k, v in declared_lookup["match"].items())
                     and isinstance(lookup_taken, dict) and lookup_taken
                     and all(isinstance(v, str) and v for v in lookup_taken.values())
@@ -625,7 +626,7 @@ def _load_config(path) -> dict:
                 },
                 "fixed": fixed,
                 "lookup_path": (config_path.parent / declared_lookup["file"]) if declared_lookup else None,
-                "lookup_match": next(iter(declared_lookup["match"].items())) if declared_lookup else ("", ""),
+                "lookup_match": tuple(declared_lookup["match"].items()) if declared_lookup else (),
                 "lookup_columns": dict(lookup_taken) if declared_lookup else {},
                 "date_formats": tuple(date_formats), "time_shift": shift, "value_from": parsed_value,
                 "currency_column": currency_column, "currency_rates": {k: v for k, v in currency_rates.items()}, "thousands_separator": amounts.get("thousands_separator", ""),
@@ -767,19 +768,38 @@ def _read_rows(spec: dict) -> list[tuple[int, dict]]:
         rows.append(row)
     rows_with_lines = [(start, row) for (start, _record), row in zip(kept[1:], rows)]
     if spec["lookup_path"] is not None:
-        their_key, my_key = spec["lookup_match"]
+        their_keys = tuple(pair[0] for pair in spec["lookup_match"])
+        my_keys = tuple(pair[1] for pair in spec["lookup_match"])
+        taken = tuple(spec["lookup_columns"].values())
         second = dict(spec, path=spec["lookup_path"], label=spec["lookup_path"].name, columns={}, fixed={},
                       required=(), filter_column="", filter_values=(), currency_column="", value_from=None,
-                      lookup_path=None, lookup_columns={})
-        carried: dict[str, dict] = {}
-        for _line, other in _read_rows(second):
-            key = _text(other, their_key)
-            if key and key not in carried:
-                carried[key] = other
+                      lookup_path=None, lookup_match=(), lookup_columns={})
+        others = _read_rows(second)
+        seen_columns: set[str] = set()
+        for _line, other in others[:50]:
+            seen_columns.update(name for name in other if isinstance(name, str))
+        lacking = sorted(column for column in {*their_keys, *taken} if others and column not in seen_columns)
+        if lacking:
+            raise ReconstructionError(f"{spec['lookup_path'].name} is missing required columns: {', '.join(lacking)}")
+        first_values: dict[tuple, tuple] = {}
+        contested: set[tuple] = set()
+        for _line, other in others:
+            key = tuple(_text(other, column) for column in their_keys)
+            if "" in key:
+                continue
+            values = tuple(_text(other, header) for header in taken)
+            if key not in first_values:
+                first_values[key] = values
+            elif first_values[key] != values:
+                contested.add(key)
         for _line, row in rows_with_lines:
-            match = carried.get(_text(row, my_key))
-            for field, header in spec["lookup_columns"].items():
-                row[LOOKUP_PREFIX + header] = _text(match, header) if match else ""
+            key = tuple(_text(row, column) for column in my_keys)
+            whole = "" not in key
+            if whole and key in contested:
+                row[LOOKUP_CONFLICT] = "conflict"
+            values = first_values.get(key) if whole and key not in contested else None
+            for position, header in enumerate(taken):
+                row[LOOKUP_PREFIX + header] = values[position] if values else ""
     headers = [
         spec["columns"][field] for field in spec["required"]
         if field in spec["columns"] and not spec["columns"][field].startswith(LOOKUP_PREFIX)
@@ -870,6 +890,12 @@ def derive(
             if spend is not None:
                 amount[ref] = _money(spend)
             continue
+        if LOOKUP_CONFLICT in row:
+            status[ref] = "conflict"
+            spend = read_amount(row, spec, "spend_aed")
+            if spend is not None:
+                amount[ref] = _money(spend)
+            continue
         campaign, channel = _field(row, spec, "campaign_id"), _field(row, spec, "channel")
         channel = aliases.get(channel.casefold(), channel)
         row_id = _field(row, spec, "row_id") if "row_id" in spec["columns"] else ""
@@ -915,6 +941,9 @@ def derive(
         if not _included(row, spec):
             status[ref] = "filtered"
             continue
+        if LOOKUP_CONFLICT in row:
+            status[ref] = "conflict"
+            continue
         lead, campaign = _field(row, spec, "lead_id"), _field(row, spec, "campaign_id")
         customer = _field(row, spec, "customer_id") if customer_join else ""
         created, stage = read_date(row, spec, "created_at"), _field(row, spec, "status").lower()
@@ -935,6 +964,12 @@ def derive(
         ref = track("revenue", index, spec, number)
         if not _included(row, spec):
             status[ref] = "filtered"
+            value = read_amount(row, spec, "value_aed")
+            if value is not None:
+                amount[ref] = _money(value)
+            continue
+        if LOOKUP_CONFLICT in row:
+            status[ref] = "conflict"
             value = read_amount(row, spec, "value_aed")
             if value is not None:
                 amount[ref] = _money(value)

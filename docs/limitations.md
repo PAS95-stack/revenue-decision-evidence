@@ -14,7 +14,7 @@
   closed deals and 112,650 real order lines joined through customers, with the
   advertising spend a declared overlay because that dataset publishes none.
 
-Verified with 155 tests on Python 3.13. CI runs the same suite on Python
+Verified with 169 tests on Python 3.13. CI runs the same suite on Python
 3.11–3.13 for every push.
 
 ## What it does not demonstrate
@@ -42,7 +42,10 @@ Verified with 155 tests on Python 3.13. CI runs the same suite on Python
   named per row at a declared rate, read European numbers such as `1.234,56`,
   carry a currency symbol beside the amount, and start its header below a report
   title. One file may also fill a field from a second export that shares a key,
-  through `lookup`, for systems that export a record across two files. It cannot
+  through `lookup`, for systems that export a record across two files. A key the
+  second file repeats with different values makes each row pointing at it a
+  conflict, and a looked-up value is as that file stands now, not as it stood on
+  the row's date. It cannot
   invent a rate, read an undeclared format, or choose between two readings of an
   ambiguous date: each is refused or left for a person to settle.
 - Line-item exports are summed per invoice when `line_id` is declared. Lines of
@@ -75,6 +78,18 @@ Verified with 155 tests on Python 3.13. CI runs the same suite on Python
   when the sheet displays it as one.
 - Amounts too large to represent are rejected, but a sum close to Python's
   28-digit decimal precision is not guarded.
+
+**Join discovery**
+- Proposing a join is measured, not assumed: on six public datasets with known
+  relationships, 100% precision (41 of 41) and no false join in a 61-file negative
+  control, but 57% recall (35 of 61). Every reachable join was found; the misses are
+  mostly small tables such as stores, staff and regions, which have too few distinct
+  values to rule out a match by chance and are left for a person to add.
+- A key that repeats is never used as a lookup, because it would copy one row into
+  several and count its money more than once. Summing payments onto invoices, or
+  picking the latest row of a history, is not attempted.
+- Joins through a bridge table (many-to-many) are out of scope.
+- `joins.py` is measured on its own; `propose` does not yet use it.
 
 **References**
 - Channel evidence IDs are numbered by sorted channel name within one run. In a

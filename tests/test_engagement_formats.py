@@ -1011,6 +1011,88 @@ class WrittenDateTests(FormatTestCase):
             load_engagement(config)
 
 
+    def lookup_engagement(self, folder: Path, deals: list[list[str]]) -> Path:
+        write_csv(folder / "leads.csv", ["mql_id", "origin", "first_contact_date", "status"],
+                  [["L-1", "C-1", "2026-07-01", "won"], ["L-2", "C-1", "2026-07-01", "won"],
+                   ["L-3", "C-1", "2026-07-01", "won"]])
+        write_csv(folder / "deals.csv", ["mql_id", "seller_id", "won_date"], deals)
+        write_csv(folder / "orders.csv", ["Order ID", "seller_id", "Sales", "Order Date"],
+                  [["T-1", "S-1", "500.00", "2026-07-10"], ["T-2", "S-2", "300.00", "2026-07-10"]])
+        write_csv(folder / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", "C-1", "Search", "100.00"]])
+        config = folder / "engagement.json"
+        config.write_text(json.dumps({
+            "config_version": 1, "engagement": "Lookup", "data_origin": "synthetic", "revenue_join": "customer_id",
+            "sources": {
+                "ads": [{"file": "ads.csv", "columns": {"date": "Day", "campaign_id": "Campaign ID",
+                                                        "channel": "Campaign type", "spend_aed": "Cost"}}],
+                "crm": [{"file": "leads.csv",
+                         "columns": {"lead_id": "mql_id", "campaign_id": "origin",
+                                     "created_at": "first_contact_date", "status": "status"},
+                         "lookup": {"file": "deals.csv", "match": {"mql_id": "mql_id"},
+                                    "columns": {"customer_id": "seller_id"}}}],
+                "revenue": [{"file": "orders.csv",
+                             "columns": {"transaction_id": "Order ID", "customer_id": "seller_id",
+                                         "value_aed": "Sales", "date": "Order Date"}}],
+            },
+        }), encoding="utf-8")
+        return config
+
+    def test_f38_a_repeated_lookup_key_is_used_when_it_agrees_and_a_conflict_when_it_does_not(self):
+        agreeing = ["L-1", "S-1", "2026-07-02"], ["L-1", "S-1", "2026-07-09"]
+        disputed = ["L-2", "S-2", "2026-07-02"], ["L-2", "S-9", "2026-07-03"]
+        blank = ["", "S-3", "2026-07-02"]
+        statuses = []
+        for order, name in (([*agreeing, *disputed, blank], "first"), ([blank, disputed[1], *agreeing, disputed[0]], "second")):
+            folder = self.root / name
+            folder.mkdir()
+            report = self.publish(self.lookup_engagement(folder, list(order)), name=f"out-{name}")
+            rows = {ref(row): row for row in report.dispositions if row.source == "crm"}
+            statuses.append({key: row.status for key, row in rows.items()})
+            self.assertEqual(rows["crm/leads.csv:2"].status, "accepted", "a repeat that agrees is harmless")
+            self.assertEqual(rows["crm/leads.csv:3"].status, "conflict", "a repeat that disagrees is a conflict")
+            self.assertIn("deals.csv has more than one row for this key", rows["crm/leads.csv:3"].reason)
+            self.assertNotIn("S-9", rows["crm/leads.csv:3"].reason, "reasons do not copy row values")
+            self.assertEqual(rows["crm/leads.csv:4"].status, "rejected", "a blank key matches nothing")
+            self.assertEqual(report.summary["attributed_revenue_aed"], "500.00")
+        self.assertEqual(statuses[0], statuses[1], "the order of rows in the second export decides nothing")
+
+    def test_f39_a_lookup_may_match_on_two_columns_and_states_it_is_current(self):
+        folder = self.root / "inputs"
+        folder.mkdir()
+        write_csv(folder / "lines.csv", ["Order", "Line", "Amount"],
+                  [["T-1", "1", "100.00"], ["T-1", "2", "50.00"], ["T-2", "1", "70.00"]])
+        write_csv(folder / "line_detail.csv", ["Order", "Line", "Customer", "Date"],
+                  [["T-1", "1", "S-1", "2026-07-10"], ["T-1", "2", "S-1", "2026-07-10"], ["T-2", "1", "S-2", "2026-07-11"]])
+        write_csv(folder / "contacts.csv", ["Record ID", "Create Date", "Lifecycle Stage", "UTM Campaign", "Customer ID"],
+                  [["L-1", "2026-07-01", "customer", "C-1", "S-1"], ["L-2", "2026-07-01", "customer", "C-1", "S-2"]])
+        write_csv(folder / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", "C-1", "Search", "100.00"]])
+        config = folder / "engagement.json"
+        config.write_text(json.dumps({
+            "config_version": 1, "engagement": "Composite", "data_origin": "synthetic", "revenue_join": "customer_id",
+            "sources": {
+                "ads": [{"file": "ads.csv", "columns": {"date": "Day", "campaign_id": "Campaign ID",
+                                                        "channel": "Campaign type", "spend_aed": "Cost"}}],
+                "crm": [{"file": "contacts.csv",
+                         "columns": {"lead_id": "Record ID", "campaign_id": "UTM Campaign", "created_at": "Create Date",
+                                     "status": "Lifecycle Stage", "customer_id": "Customer ID"}}],
+                "revenue": [{"file": "lines.csv",
+                             "columns": {"transaction_id": "Order", "line_id": "Line", "value_aed": "Amount"},
+                             "lookup": {"file": "line_detail.csv", "match": {"Order": "Order", "Line": "Line"},
+                                        "columns": {"customer_id": "Customer", "date": "Date"}}}],
+            },
+        }), encoding="utf-8")
+        report = self.publish(config)
+        self.assertEqual(report.summary["accepted_revenue_aed"], "220.00")
+        self.assertEqual(report.summary["attributed_revenue_aed"], "220.00")
+        brief = (self.root / "out" / "executive_brief.md").read_text(encoding="utf-8")
+        self.assertIn("as that file stands now rather than as it stood on each row's date", brief)
+        edit_json(config, lambda c: c["sources"]["revenue"][0]["lookup"]["columns"].update(date="Invoice date"))
+        with self.assertRaisesRegex(InputContractError, "missing the declared column 'Invoice date'"):
+            EvidenceEngine().run_engagement(load_engagement(config))
+
+
 class OneCommandTests(FormatTestCase):
     """The whole journey in one command, so an engagement needs no assembly by hand."""
 
