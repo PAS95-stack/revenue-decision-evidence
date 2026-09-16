@@ -81,6 +81,15 @@ Verified with 138 tests on Python 3.13. CI runs the same suite on Python
 - Exception groups use the engine's reason text. The checker verifies their rows,
   amounts and examples, not the wording; "who can fix it" is a fixed mapping.
 
+**Size**
+- Measured on this machine: 34,289 rows in about 7 seconds, and 108,389 rows in
+  about 63 seconds using 0.8 GB of memory. Both the engine and the checker hold a
+  run in memory, so time and memory grow with the number of rows; expect minutes
+  and several gigabytes beyond a few hundred thousand rows, and split a large
+  period into shorter engagements if that matters.
+- `lineage.csv` is the large file: 61 MB at 108,389 rows, because every figure
+  names every row behind it.
+
 **Scope**
 - Not a security review. The code has no access control, encryption or retention
   handling.

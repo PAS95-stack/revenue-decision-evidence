@@ -167,6 +167,13 @@ checker. Its largest exception was the invoices without a customer ID, which hel
 AED 7,093,643.80. It publishes an 8.9 MB `report.json` beside a 27 MB `lineage.csv`
 holding all 274,801 lineage entries, and a 7 KB brief.
 
+## Size
+
+A run holds its rows in memory in both implementations. Measured here: 34,289 rows
+in about 7 seconds; 108,389 rows in about 63 seconds using 0.8 GB, writing a 28 KB
+`report.json` beside a 61 MB `lineage.csv`. For much larger exports, run a shorter
+period per engagement.
+
 ## What a config cannot express
 
 - More than one date format or currency within one file.
