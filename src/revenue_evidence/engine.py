@@ -236,6 +236,10 @@ MULTIPLE_CAMPAIGN_RULES = ("unattributed", "first_touch", "last_touch")
 # positive amount (a separate credit-note export).
 REFUND_MODES = ("reject", "negative_values", "whole_file")
 CURRENCY_CODE = re.compile(r"[A-Z]{3}")
+# Excel writes ; in many locales and some systems export tabs; legacy systems are
+# rarely UTF-8. Each is declared, never sniffed.
+DELIMITERS = {"comma": ",", "semicolon": ";", "tab": "\t"}
+ENCODINGS = {"utf-8": "utf-8-sig", "utf-16": "utf-16", "windows-1252": "cp1252", "latin-1": "latin-1"}
 MAX_INTEGER_DIGITS = 15
 # Only descriptive labels may be declared once for a whole file (a Meta export has no
 # channel column). Identifiers, dates and amounts must come from the rows themselves.
@@ -247,7 +251,9 @@ CONFIG_KEYS = frozenset(
         "multiple_campaigns", "coverage_threshold_percent", "sources",
     }
 )
-FILE_KEYS = frozenset({"file", "columns", "fixed", "date_format", "amounts", "uppercase", "include_when"})
+FILE_KEYS = frozenset(
+    {"file", "columns", "fixed", "date_format", "amounts", "uppercase", "include_when", "delimiter", "encoding"}
+)
 MAX_FILES_PER_SOURCE = 20
 MAX_WINDOWS = 5
 
@@ -295,6 +301,8 @@ class FileSpec:
     uppercase: frozenset[str] = frozenset()
     # Fields this file must supply; empty means the three-file contract's fields.
     fields: tuple[str, ...] = ()
+    delimiter: str = "comma"
+    encoding: str = "utf-8"
     filter_column: str = ""
     filter_values: tuple[str, ...] = ()
     # Amounts are written in this currency and converted at the declared rate.
@@ -429,6 +437,8 @@ class Engagement:
                     "columns": dict(spec.columns),
                     "fixed": dict(spec.fixed),
                     "date_format": spec.date_format,
+                    "delimiter": spec.delimiter,
+                    "encoding": spec.encoding,
                     "thousands_separator": spec.thousands_separator,
                     "currency_label": spec.currency_label,
                     "currency": spec.currency,
@@ -577,6 +587,12 @@ def load_engagement(config_path: str | Path) -> Engagement:
                 fail(f"{where} must give each field exactly one column or fixed value: {', '.join(unclear)}")
             if len(set(columns.values())) != len(columns):
                 fail(f"{where}.columns maps two fields to the same column")
+            delimiter = entry.get("delimiter", "comma")
+            if delimiter not in DELIMITERS:
+                fail(f"{where}.delimiter must be one of {', '.join(DELIMITERS)}")
+            encoding = entry.get("encoding", "utf-8")
+            if encoding not in ENCODINGS:
+                fail(f"{where}.encoding must be one of {', '.join(ENCODINGS)}")
             date_format = entry.get("date_format", "YYYY-MM-DD")
             if date_format not in DATE_FORMATS:
                 fail(f"{where}.date_format must be one of {', '.join(DATE_FORMATS)}")
@@ -643,7 +659,7 @@ def load_engagement(config_path: str | Path) -> Engagement:
             specs.append(
                 FileSpec(
                     source, file_path, label, dict(columns), dict(fixed), date_format, separator, currency_label,
-                    frozenset(uppercase), tuple(fields), filter_column, filter_values, code, rate, rate_source, refunds,
+                    frozenset(uppercase), tuple(fields), delimiter, encoding, filter_column, filter_values, code, rate, rate_source, refunds,
                 )
             )
         for optional in OPTIONAL_FIELDS[source]:
@@ -689,8 +705,8 @@ def _read_csv(spec: FileSpec) -> list[tuple[int, dict[str, Any]]]:
     fieldnames: list[str] | None = None
     rows: list[tuple[int, dict[str, Any]]] = []
     try:
-        with spec.path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.reader(handle)
+        with spec.path.open("r", encoding=ENCODINGS[spec.encoding], newline="") as handle:
+            reader = csv.reader(handle, delimiter=DELIMITERS[spec.delimiter])
             previous_line = 0
             for record in reader:
                 start_line = previous_line + 1
@@ -704,8 +720,11 @@ def _read_csv(spec: FileSpec) -> list[tuple[int, dict[str, Any]]]:
                 if len(record) > len(fieldnames):
                     row[None] = record[len(fieldnames):]
                 rows.append((start_line, row))
-    except UnicodeDecodeError as exc:
-        raise InputContractError(f"{spec.name} is not UTF-8 text") from exc
+    except (UnicodeDecodeError, UnicodeError) as exc:
+        raise InputContractError(
+            f"{spec.name} is not UTF-8 text" if spec.encoding == "utf-8"
+            else f"{spec.name} is not {spec.encoding} text as declared"
+        ) from exc
     except csv.Error as exc:
         raise InputContractError(f"{spec.name} is not a readable CSV ({exc})") from exc
     found = list(fieldnames or [])
@@ -1920,6 +1939,8 @@ def _interpretations(report: EvidenceReport) -> str:
         parts = [", ".join(f"{name} from '{header}'" for name, header in item["columns"].items())]
         if item["fixed"]:
             parts.append(", ".join(f"{name} fixed as {value}" for name, value in item["fixed"].items()))
+        if item["delimiter"] != "comma" or item["encoding"] != "utf-8":
+            parts.append(f"{item['delimiter']}-separated {item['encoding']} text")
         parts.append(f"dates written {item['date_format']}")
         if item["source"] != "crm":
             amount = [

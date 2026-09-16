@@ -23,6 +23,7 @@ or evidence of paid validation.
   the questions that need answers, and always states: *Do not reallocate budget
   from this evidence set alone.*
 - **Reads real exports through a declared engagement config.** Column names,
+  separators and encodings (including semicolon-separated Windows-1252 files),
   date and number formats, ad accounts in other currencies, refunds and credit
   notes, revenue that names customers rather than leads, and attribution
   windows are declared per engagement, never guessed. See
@@ -101,6 +102,13 @@ The worked example reads Meta, Google Ads, HubSpot and Xero-shaped files:
 
 ```bash
 PYTHONPATH=src python3 -m revenue_evidence.cli --config examples/messy-exports/engagement.json --output /tmp/example
+```
+
+Spreadsheets convert first, keeping the sheet's row numbers and recording the
+workbook's SHA-256:
+
+```bash
+python3 scripts/xlsx_to_csv.py Orders.xlsx --sheet Invoices --out ~/engagements/client-2026-09/inputs/invoices.csv
 ```
 
 The full procedure, the config reference and what a config cannot express are in

@@ -2,7 +2,7 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 135 tests, all passing on Python 3.13 on 16 September 2026, in about
+**Result:** 138 tests, all passing on Python 3.13 on 16 September 2026, in about
 two seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
@@ -159,3 +159,6 @@ minimum.
 | f15 | A wrongly declared date or amount format is diagnosed with the declaration that would have matched |
 | f16 | Above the published limits the row detail and lineage stay in the CSV files, which keep every row |
 | f17 | A report that drops detail small enough to publish is refused |
+| f18 | An .xlsx sheet converts to a CSV whose lines are the sheet's rows, with date-formatted cells as dates and the workbook's SHA-256 recorded |
+| f19 | A converted workbook runs end to end and its row references are spreadsheet rows |
+| f20 | Semicolon-separated Windows-1252 exports are read when declared, with quoted newlines keeping later rows on their own line |

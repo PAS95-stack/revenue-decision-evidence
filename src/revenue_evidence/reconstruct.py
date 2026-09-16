@@ -152,6 +152,8 @@ IDENTIFIERS = {
     "revenue": ("transaction_id", "lead_id", "customer_id"),
 }
 REFUND_MODES = ("reject", "negative_values", "whole_file")
+DELIMITERS = {"comma": ",", "semicolon": ";", "tab": "\t"}
+ENCODINGS = {"utf-8": "utf-8-sig", "utf-16": "utf-16", "windows-1252": "cp1252", "latin-1": "latin-1"}
 OPTIONAL = {"ads": ("row_id",), "crm": (), "revenue": ("line_id",)}
 
 
@@ -234,7 +236,7 @@ def _plain_spec(name: str, path) -> dict:
         "path": Path(path), "label": "", "columns": {field: field for field in REQUIRED[name]}, "fixed": {},
         "date_format": "YYYY-MM-DD", "thousands_separator": "", "currency_label": "", "currency": "AED",
         "aed_per_unit": "1", "rate_source": "", "refunds": "reject", "uppercase": set(), "required": REQUIRED[name],
-        "filter_column": "", "filter_values": (),
+        "filter_column": "", "filter_values": (), "delimiter": "comma", "encoding": "utf-8",
     }
 
 
@@ -306,6 +308,9 @@ def _load_config(path) -> dict:
             )
             date_format = entry.get("date_format", "YYYY-MM-DD")
             need(date_format in DATE_FORMAT_NAMES, f"{label}: unknown date_format")
+            delimiter = entry.get("delimiter", "comma")
+            encoding = entry.get("encoding", "utf-8")
+            need(delimiter in DELIMITERS and encoding in ENCODINGS, f"{label}: unknown delimiter or encoding")
             amounts = entry.get("amounts", {})
             need(isinstance(amounts, dict), f"{label}: amounts must be an object")
             currency = amounts.get("currency", {})
@@ -331,6 +336,7 @@ def _load_config(path) -> dict:
                 "currency_label": amounts.get("currency_label", ""), "currency": code, "aed_per_unit": rate,
                 "rate_source": currency.get("rate_source", ""), "refunds": refunds, "uppercase": set(uppercase),
                 "required": required[name],
+                "delimiter": delimiter, "encoding": encoding,
                 "filter_column": chosen["column"] if chosen else "",
                 "filter_values": tuple(sorted({value.casefold() for value in chosen["values"]})) if chosen else (),
             }
@@ -338,7 +344,8 @@ def _load_config(path) -> dict:
             described.append(
                 {
                     "source": name, "file": label, "columns": dict(columns), "fixed": dict(fixed),
-                    "date_format": date_format, "thousands_separator": spec["thousands_separator"],
+                    "date_format": date_format, "delimiter": delimiter, "encoding": encoding,
+                    "thousands_separator": spec["thousands_separator"],
                     "currency_label": spec["currency_label"], "currency": code, "aed_per_unit": rate,
                     "rate_source": spec["rate_source"], "refunds": refunds, "uppercase": sorted(set(uppercase)),
                     "include_when": {"column": chosen["column"], "values": sorted({v.casefold() for v in chosen["values"]})} if chosen else None,
@@ -368,7 +375,7 @@ def _load_config(path) -> dict:
     }
 
 
-def _record_start_lines(text: str) -> list[int]:
+def _record_start_lines(text: str, delimiter: str = ",") -> list[int]:
     """Physical start line of every non-blank CSV record, found without the csv module.
 
     A small quote-aware scanner: newlines inside a quoted field continue the
@@ -394,9 +401,9 @@ def _record_start_lines(text: str) -> list[int]:
             continue
         empty = False
         if state == "field_start":
-            state = "quoted" if char == '"' else "field_start" if char == "," else "unquoted"
+            state = "quoted" if char == '"' else "field_start" if char == delimiter else "unquoted"
         elif state == "unquoted":
-            if char == ",":
+            if char == delimiter:
                 state = "field_start"
         elif state == "quoted":
             if char == '"':
@@ -406,7 +413,7 @@ def _record_start_lines(text: str) -> list[int]:
                 if crlf:
                     index += 1
         elif state == "closing_quote":
-            state = "quoted" if char == '"' else "field_start" if char == "," else "unquoted"
+            state = "quoted" if char == '"' else "field_start" if char == delimiter else "unquoted"
         index += 1
     if not empty:
         starts.append(record_line)
@@ -417,13 +424,16 @@ def _read_rows(spec: dict) -> list[tuple[int, dict]]:
     path = Path(spec["path"])
     name = spec["label"] or path.name
     try:
-        text = path.read_bytes().decode("utf-8-sig")
+        text = path.read_bytes().decode(ENCODINGS[spec["encoding"]])
     except OSError as exc:
         raise ReconstructionError(f"cannot read {name} ({type(exc).__name__})") from exc
-    except UnicodeDecodeError as exc:
-        raise ReconstructionError(f"{name} is not UTF-8 text") from exc
+    except (UnicodeDecodeError, UnicodeError) as exc:
+        raise ReconstructionError(
+            f"{name} is not UTF-8 text" if spec["encoding"] == "utf-8"
+            else f"{name} is not {spec['encoding']} text as declared"
+        ) from exc
     try:
-        reader = csv.DictReader(io.StringIO(text, newline=""))
+        reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=DELIMITERS[spec["delimiter"]])
         fieldnames = list(reader.fieldnames or [])
         rows = [dict(row) for row in reader]
     except csv.Error as exc:
@@ -435,7 +445,7 @@ def _read_rows(spec: dict) -> list[tuple[int, dict]]:
     repeated = sorted({header for header in headers if fieldnames.count(header) > 1})
     if repeated:
         raise ReconstructionError(f"{name} has more than one column named {', '.join(repeated)}")
-    starts = _record_start_lines(text)
+    starts = _record_start_lines(text, DELIMITERS[spec["delimiter"]])
     if len(starts) != len(rows) + 1:
         raise ReconstructionError(f"cannot align the records of {name} to physical lines")
     return list(zip(starts[1:], rows))

@@ -11,7 +11,7 @@
 - Real-shaped exports read through a declared engagement config, rehearsed on
   25,900 public invoices with a synthetic CRM and advertising overlay.
 
-Verified with 135 tests on Python 3.13. CI runs the same suite on Python
+Verified with 138 tests on Python 3.13. CI runs the same suite on Python
 3.11–3.13 for every push.
 
 ## What it does not demonstrate
@@ -41,6 +41,12 @@ Verified with 135 tests on Python 3.13. CI runs the same suite on Python
 - Invoice status is read only when an `include_when` filter declares which values
   to keep; otherwise every row in the export counts, including unpaid invoices.
 - Time of day and time zones are ignored; dates are taken as written.
+- Separator and encoding are declared, not detected: `comma`, `semicolon` or
+  `tab`, and UTF-8, UTF-16, Windows-1252 or Latin-1.
+- Spreadsheets are converted to CSV by `scripts/xlsx_to_csv.py` before a run. The
+  conversion records the workbook's SHA-256 and keeps row numbers aligned with the
+  sheet, but it is a step outside the checked path, and it reads a cell as a date
+  when the sheet displays it as one.
 - Amounts too large to represent are rejected, but a sum close to Python's
   28-digit decimal precision is not guarded.
 

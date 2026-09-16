@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import hashlib
 import importlib.util
 import io
 import json
@@ -17,6 +18,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -491,6 +493,116 @@ class LineItemAndFilterTests(FormatTestCase):
         }))
         with self.assertRaisesRegex(InputContractError, "declare line_id in every file"):
             load_engagement(config)
+
+
+SHEET_XML = """<?xml version="1.0"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c></row>
+<row r="2"><c r="A2" t="inlineStr"><is><t>INV-1</t></is></c><c r="B2" t="s"><v>4</v></c><c r="C2"><v>100.5</v></c><c r="D2" s="1"><v>45658</v></c></row>
+<row r="4"><c r="A4" t="inlineStr"><is><t>INV-2</t></is></c><c r="B4" t="s"><v>4</v></c><c r="C4"><v>50</v></c><c r="D4" s="1"><v>45659</v></c></row>
+</sheetData></worksheet>"""
+STRINGS_XML = """<?xml version="1.0"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="5" uniqueCount="5">
+<si><t>Invoice</t></si><si><t>Lead</t></si><si><t>Amount</t></si><si><t>Date</t></si><si><t>L1</t></si></sst>"""
+STYLES_XML = """<?xml version="1.0"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14" applyNumberFormat="1"/></cellXfs></styleSheet>"""
+WORKBOOK_XML = """<?xml version="1.0"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Invoices" sheetId="1" r:id="rId1"/></sheets></workbook>"""
+WORKBOOK_RELS = """<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>"""
+
+
+class SpreadsheetAndSeparatorTests(FormatTestCase):
+    """Clients send .xlsx workbooks, and Excel writes semicolons in many locales."""
+
+    def workbook(self, path: Path) -> Path:
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("xl/workbook.xml", WORKBOOK_XML)
+            archive.writestr("xl/_rels/workbook.xml.rels", WORKBOOK_RELS)
+            archive.writestr("xl/worksheets/sheet1.xml", SHEET_XML)
+            archive.writestr("xl/sharedStrings.xml", STRINGS_XML)
+            archive.writestr("xl/styles.xml", STYLES_XML)
+        return path
+
+    def converter(self):
+        spec = importlib.util.spec_from_file_location("xlsx_to_csv", ROOT / "scripts" / "xlsx_to_csv.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_f18_a_workbook_becomes_a_csv_whose_lines_are_the_sheet_rows(self):
+        module = self.converter()
+        workbook = self.workbook(self.root / "Orders.xlsx")
+        target = self.root / "invoices.csv"
+        manifest = module.convert(workbook, target)
+        lines = target.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], "Invoice,Lead,Amount,Date")
+        self.assertEqual(lines[1], "INV-1,L1,100.5,2025-01-01", "a date-formatted cell is written as a date")
+        self.assertEqual(lines[2], "", "an empty sheet row keeps the numbering")
+        self.assertEqual(lines[3], "INV-2,L1,50,2025-01-02")
+        self.assertEqual((manifest["rows_written"], manifest["cells_read_as_dates"], manifest["sheet"]), (4, 2, "Invoices"))
+        self.assertEqual(manifest["workbook_sha256"], hashlib.sha256(workbook.read_bytes()).hexdigest())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(module.main([str(workbook), "--out", str(self.root / "again.csv")]), 0)
+        self.assertTrue((self.root / "again.csv.conversion.json").exists())
+
+    def test_f19_a_converted_workbook_runs_and_its_references_are_sheet_rows(self):
+        module = self.converter()
+        folder = self.root / "converted"
+        folder.mkdir()
+        module.convert(self.workbook(self.root / "Orders.xlsx"), folder / "invoices.csv")
+        write_csv(folder / "ads.csv", ["date", "campaign_id", "channel", "spend_aed"],
+                  [["2024-12-01", "C-1", "Paid Search", "100"]])
+        write_csv(folder / "crm.csv", ["lead_id", "campaign_id", "created_at", "status"],
+                  [["L1", "C-1", "2024-12-15", "won"]])
+        config = {
+            "config_version": 1, "engagement": "Converted workbook", "data_origin": "synthetic",
+            "sources": {
+                "ads": [{"file": "ads.csv", "columns": {name: name for name in ("date", "campaign_id", "channel", "spend_aed")}}],
+                "crm": [{"file": "crm.csv", "columns": {name: name for name in ("lead_id", "campaign_id", "created_at", "status")}}],
+                "revenue": [{"file": "invoices.csv",
+                             "columns": {"transaction_id": "Invoice", "lead_id": "Lead", "value_aed": "Amount", "date": "Date"}}],
+            },
+        }
+        (folder / "engagement.json").write_text(json.dumps(config), encoding="utf-8")
+        report = self.publish(folder / "engagement.json")
+        rows = {ref(row): row for row in report.dispositions}
+        self.assertEqual(rows["revenue/invoices.csv:4"].record_id, "INV-2", "sheet row 4 is CSV line 4")
+        self.assertEqual(report.summary["accepted_revenue_aed"], "150.50")
+
+    def test_f20_semicolon_and_windows_1252_exports_are_read_when_declared(self):
+        folder = self.root / "separated"
+        folder.mkdir()
+        (folder / "ads.csv").write_bytes(
+            "date;campaign_id;channel;spend_aed\n2026-07-01;C-1;Paid Search;100\n".encode("cp1252"))
+        (folder / "crm.csv").write_bytes(
+            'lead_id;campaign_id;created_at;status\nL1;C-1;2026-07-02;"won;\nfollow-up"\nL2;C-1;2026-07-03;won\n'.encode("cp1252"))
+        (folder / "revenue.csv").write_bytes(
+            "transaction_id;lead_id;value_aed;date\nT1;L2;300;2026-07-10\n".encode("cp1252"))
+        config = {
+            "config_version": 1, "engagement": "Semicolon exports", "data_origin": "synthetic",
+            "sources": {
+                source: [{"file": f"{source}.csv", "delimiter": "semicolon", "encoding": "windows-1252",
+                          "columns": {name: name for name in columns}}]
+                for source, columns in (
+                    ("ads", ("date", "campaign_id", "channel", "spend_aed")),
+                    ("crm", ("lead_id", "campaign_id", "created_at", "status")),
+                    ("revenue", ("transaction_id", "lead_id", "value_aed", "date")),
+                )
+            },
+        }
+        (folder / "engagement.json").write_text(json.dumps(config), encoding="utf-8")
+        report = self.publish(folder / "engagement.json")
+        rows = {ref(row): row for row in report.dispositions}
+        self.assertEqual(rows["crm/crm.csv:2"].status, "accepted")
+        self.assertEqual(rows["crm/crm.csv:4"].record_id, "L2", "a quoted newline keeps later rows on their own line")
+        self.assertEqual(report.summary["attributed_revenue_aed"], "300.00")
+        self.assertIn("semicolon-separated windows-1252 text",
+                      (self.root / "out" / "executive_brief.md").read_text(encoding="utf-8"))
 
 
 class ReportSizeTests(FormatTestCase):

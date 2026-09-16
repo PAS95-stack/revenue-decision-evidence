@@ -48,6 +48,21 @@ The SHA-256 of each file is recorded. A run refuses any export that was not logg
 has changed since. If the client sends a corrected file, give it a new name and log
 it again.
 
+### Spreadsheets
+
+A workbook is converted to CSV first, keeping the sheet's row numbers so a row
+reference points at the spreadsheet row:
+
+```bash
+python3 scripts/xlsx_to_csv.py ~/engagements/acme-2026-09/inputs/Orders.xlsx --sheet Invoices --out ~/engagements/acme-2026-09/inputs/invoices.csv
+```
+
+It writes `invoices.csv.conversion.json` recording the workbook's SHA-256, the
+sheet, the rows written and how many cells were read as dates. Log both the
+workbook and the CSV at intake. Cells shown as dates become `YYYY-MM-DD`, or
+`YYYY-MM-DD HH:MM:SS` when they carry a time; every other cell is written as the
+workbook stores it.
+
 ## 3. Complete `inputs/engagement.json`
 
 Open each export's header row and replace the placeholders. The worked example is
@@ -75,6 +90,8 @@ Xero-shaped files.
 | `file` | yes | File name, relative to the config. Row references use it, e.g. `revenue/xero_invoices.csv:6` |
 | `columns` | yes | Field to column header, exactly as written in the export |
 | `fixed` | no | A value for a whole file: `channel` for an ad export with no channel column, or `status` for a CRM export |
+| `delimiter` | no | `comma` (default), `semicolon` (Excel in many locales) or `tab` |
+| `encoding` | no | `utf-8` (default, byte-order mark allowed), `utf-16`, `windows-1252` or `latin-1` |
 | `date_format` | no | One of `YYYY-MM-DD` (default), `DD/MM/YYYY`, `MM/DD/YYYY`, each optionally followed by ` HH:MM` or ` HH:MM:SS`, or `YYYY-MM-DDTHH:MM:SS`. The time of day is ignored |
 | `amounts.thousands_separator` | no | `","` or `""` |
 | `amounts.currency_label` | no | Text that may precede or follow the number, such as `AED` or `USD`; must equal the currency |
@@ -156,4 +173,6 @@ holding all 274,801 lineage entries, and a 7 KB brief.
 - Columns computed from others, such as quantity × unit price.
 - Invoice status: an unpaid invoice counts as revenue if it is in the export.
 - Time zones. The date is taken as written.
+- Reading a workbook directly: the conversion above is a step outside the checked
+  run, recorded by its manifest.
 - Attribution rules other than first and last touch.
