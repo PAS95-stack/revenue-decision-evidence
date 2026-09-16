@@ -47,7 +47,7 @@ REQUIRED = {
     "crm": ("lead_id", "campaign_id", "created_at", "status"),
     "revenue": ("transaction_id", "lead_id", "value_aed", "date"),
 }
-STATUSES = ("accepted", "accepted-unattributed", "rejected", "duplicate", "conflict")
+STATUSES = ("accepted", "accepted-unattributed", "rejected", "duplicate", "conflict", "filtered")
 CHECKS = (
     "sources_match_fingerprints",
     "engagement_config",
@@ -63,6 +63,10 @@ CHECKS = (
     "sufficient_evidence",
 )
 MAX_DETAILS = 5
+# The same rule the engine applies: above these sizes report.json leaves the detail in
+# the CSVs. Checked here so detail cannot go missing from a report small enough to hold it.
+REPORT_ROW_LIMIT = 50_000
+REPORT_LINEAGE_LIMIT = 200_000
 
 
 class ReconstructionError(Exception):
@@ -148,6 +152,13 @@ IDENTIFIERS = {
     "revenue": ("transaction_id", "lead_id", "customer_id"),
 }
 REFUND_MODES = ("reject", "negative_values", "whole_file")
+OPTIONAL = {"ads": ("row_id",), "crm": (), "revenue": ("line_id",)}
+
+
+def _included(row: dict, spec: dict) -> bool:
+    if not spec["filter_column"]:
+        return True
+    return _text(row, spec["filter_column"]).casefold() in spec["filter_values"]
 
 
 def _ref(source: str, label: str, line: int) -> str:
@@ -223,6 +234,7 @@ def _plain_spec(name: str, path) -> dict:
         "path": Path(path), "label": "", "columns": {field: field for field in REQUIRED[name]}, "fixed": {},
         "date_format": "YYYY-MM-DD", "thousands_separator": "", "currency_label": "", "currency": "AED",
         "aed_per_unit": "1", "rate_source": "", "refunds": "reject", "uppercase": set(), "required": REQUIRED[name],
+        "filter_column": "", "filter_values": (),
     }
 
 
@@ -248,6 +260,8 @@ def _load_config(path) -> dict:
     rule = config.get("multiple_campaigns", "unattributed")
     need(rule in ("unattributed", "first_touch", "last_touch"), "multiple_campaigns is invalid")
     need(rule == "unattributed" or join == "customer_id", "multiple_campaigns needs revenue_join customer_id")
+    threshold = config.get("coverage_threshold_percent", "80")
+    need(isinstance(threshold, str) and PLAIN_DECIMAL.fullmatch(threshold) is not None, "coverage_threshold_percent is invalid")
     windows = config.get("attribution_windows_days", DEFAULT_WINDOWS)
     need(
         isinstance(windows, list) and 1 <= len(windows) <= 5
@@ -277,9 +291,18 @@ def _load_config(path) -> dict:
             columns, fixed = entry.get("columns", {}), entry.get("fixed", {})
             need(isinstance(columns, dict) and isinstance(fixed, dict), f"{label}: columns and fixed must be objects")
             need(
-                not set(columns) & set(fixed) and sorted(set(columns) | set(fixed)) == sorted(required[name])
+                not set(columns) & set(fixed)
+                and sorted(set(columns) | set(fixed)) == sorted(set(required[name]) | (set(columns) & set(OPTIONAL[name])))
+                and set(required[name]) <= set(columns) | set(fixed)
                 and set(fixed) <= set(FIXABLE[name]),
                 f"{label}: every field needs exactly one column or allowed fixed value",
+            )
+            chosen = entry.get("include_when")
+            need(
+                chosen is None
+                or (isinstance(chosen, dict) and set(chosen) == {"column", "values"} and isinstance(chosen.get("values"), list)
+                    and chosen["values"] and all(isinstance(value, str) for value in chosen["values"])),
+                f"{label}: include_when is invalid",
             )
             date_format = entry.get("date_format", "YYYY-MM-DD")
             need(date_format in DATE_FORMAT_NAMES, f"{label}: unknown date_format")
@@ -308,6 +331,8 @@ def _load_config(path) -> dict:
                 "currency_label": amounts.get("currency_label", ""), "currency": code, "aed_per_unit": rate,
                 "rate_source": currency.get("rate_source", ""), "refunds": refunds, "uppercase": set(uppercase),
                 "required": required[name],
+                "filter_column": chosen["column"] if chosen else "",
+                "filter_values": tuple(sorted({value.casefold() for value in chosen["values"]})) if chosen else (),
             }
             files[name].append(spec)
             described.append(
@@ -316,6 +341,7 @@ def _load_config(path) -> dict:
                     "date_format": date_format, "thousands_separator": spec["thousands_separator"],
                     "currency_label": spec["currency_label"], "currency": code, "aed_per_unit": rate,
                     "rate_source": spec["rate_source"], "refunds": refunds, "uppercase": sorted(set(uppercase)),
+                    "include_when": {"column": chosen["column"], "values": sorted({v.casefold() for v in chosen["values"]})} if chosen else None,
                 }
             )
     fingerprint = hashlib.sha256(raw).hexdigest()
@@ -326,6 +352,7 @@ def _load_config(path) -> dict:
         "aliases": folded,
         "join": join,
         "rule": rule,
+        "threshold": threshold,
         "fingerprint": fingerprint,
         "declared": {
             "name": config.get("engagement"),
@@ -335,6 +362,7 @@ def _load_config(path) -> dict:
             "channel_aliases": dict(sorted(folded.items())),
             "revenue_join": join,
             "multiple_campaigns": rule,
+            "coverage_threshold_percent": threshold,
             "files": described,
         },
     }
@@ -480,35 +508,57 @@ def derive(
     valid_ads = []
     for index, spec, number, row in raw["ads"]:
         ref = track("ads", index, spec, number)
+        if not _included(row, spec):
+            status[ref] = "filtered"
+            spend = read_amount(row, spec, "spend_aed")
+            if spend is not None:
+                amount[ref] = _money(spend)
+            continue
         campaign, channel = _field(row, spec, "campaign_id"), _field(row, spec, "channel")
         channel = aliases.get(channel.casefold(), channel)
+        row_id = _field(row, spec, "row_id") if "row_id" in spec["columns"] else ""
         day, spend = read_date(row, spec, "date"), read_amount(row, spec, "spend_aed")
         if spend is not None:
             amount[ref] = _money(spend)
-        if not campaign or not channel or any(mark in campaign + channel for mark in "[]") or day is None or spend is None:
+        if (
+            not campaign or not channel or any(mark in campaign + channel for mark in "[]")
+            or day is None or spend is None or ("row_id" in spec["columns"] and not row_id)
+        ):
             status[ref] = "rejected"
             continue
-        valid_ads.append({"ref": ref, "row": order[ref], "date": day, "campaign": campaign, "channel": channel, "spend": spend})
+        valid_ads.append({"ref": ref, "row": order[ref], "date": day, "campaign": campaign, "channel": channel,
+                          "spend": spend, "row_id": row_id})
     channels_by_campaign: dict[str, set] = {}
     for item in valid_ads:
         channels_by_campaign.setdefault(item["campaign"], set()).add(item["channel"])
-    ads, seen = [], set()
+    remaining = []
     for item in valid_ads:
         if len(channels_by_campaign[item["campaign"]]) > 1:
             status[item["ref"]] = "conflict"
             continue
-        signature = (item["date"], item["campaign"], item["channel"], item["spend"])
-        if signature in seen:
-            status[item["ref"]] = "duplicate"
-            continue
-        seen.add(signature)
-        status[item["ref"]] = "accepted"
-        ads.append(item)
+        remaining.append(item)
+    if remaining and remaining[0]["row_id"]:
+        ads, _ = _resolve(
+            remaining, "row_id", lambda item: (item["date"], item["campaign"], item["channel"], item["spend"]), status
+        )
+    else:
+        ads, seen = [], set()
+        for item in remaining:
+            signature = (item["date"], item["campaign"], item["channel"], item["spend"])
+            if signature in seen:
+                status[item["ref"]] = "duplicate"
+                continue
+            seen.add(signature)
+            status[item["ref"]] = "accepted"
+            ads.append(item)
 
     customer_join = join == "customer_id"
     valid_crm = []
     for index, spec, number, row in raw["crm"]:
         ref = track("crm", index, spec, number)
+        if not _included(row, spec):
+            status[ref] = "filtered"
+            continue
         lead, campaign = _field(row, spec, "lead_id"), _field(row, spec, "campaign_id")
         customer = _field(row, spec, "customer_id") if customer_join else ""
         created, stage = read_date(row, spec, "created_at"), _field(row, spec, "status").lower()
@@ -523,20 +573,48 @@ def derive(
     )
 
     link = "customer_id" if customer_join else "lead_id"
+    line_items = any("line_id" in spec["columns"] for spec in specs["revenue"])
     valid_revenue = []
     for index, spec, number, row in raw["revenue"]:
         ref = track("revenue", index, spec, number)
+        if not _included(row, spec):
+            status[ref] = "filtered"
+            value = read_amount(row, spec, "value_aed")
+            if value is not None:
+                amount[ref] = _money(value)
+            continue
         transaction, lead = _field(row, spec, "transaction_id"), _field(row, spec, link)
+        line = _field(row, spec, "line_id") if line_items else ""
         value, day = read_amount(row, spec, "value_aed"), read_date(row, spec, "date")
         if value is not None:
             amount[ref] = _money(value)
-        if not transaction or not lead or value is None or day is None:
+        if not transaction or not lead or value is None or day is None or (line_items and not line):
             status[ref] = "rejected"
             continue
-        valid_revenue.append({"ref": ref, "row": order[ref], "transaction": transaction, "lead": lead, "value": value, "date": day})
-    revenue, _ = _resolve(
-        valid_revenue, "transaction", lambda item: (item["lead"], item["value"], item["date"]), status
+        valid_revenue.append({"ref": ref, "row": order[ref], "transaction": transaction, "lead": lead, "value": value,
+                              "date": day, "identity": f"{transaction}\x1f{line}" if line_items else transaction})
+    accepted_lines, _ = _resolve(
+        valid_revenue, "identity", lambda item: (item["lead"], item["value"], item["date"]), status
     )
+    if line_items:
+        by_invoice: dict[str, list] = {}
+        for item in accepted_lines:
+            by_invoice.setdefault(item["transaction"], []).append(item)
+        revenue = []
+        for transaction, lines in by_invoice.items():
+            if len({line["lead"] for line in lines}) > 1 or len({line["date"] for line in lines}) > 1:
+                for line in lines:
+                    status[line["ref"]] = "conflict"
+                continue
+            first = min(lines, key=lambda line: line["row"])
+            revenue.append({
+                "ref": first["ref"], "row": first["row"], "transaction": transaction, "lead": first["lead"],
+                "date": first["date"], "value": sum((line["value"] for line in lines), Decimal("0")),
+                "refs": [line["ref"] for line in lines], "rows": lines,
+            })
+        revenue.sort(key=lambda invoice: invoice["row"])
+    else:
+        revenue = [{**item, "refs": [item["ref"]], "rows": [item]} for item in accepted_lines]
 
     # Revenue reaches CRM records through its lead, or through every accepted lead of its customer.
     def key_of(item: dict) -> str:
@@ -561,7 +639,8 @@ def derive(
         single_campaign = rule != "unattributed" or len({lead["campaign"] for lead in candidates}) == 1
         channel = campaign_channel.get(first["campaign"]) if first is not None and single_campaign else None
         if first is None or channel is None or item["date"] < first["created"]:
-            status[item["ref"]] = "accepted-unattributed"
+            for line in item["rows"]:
+                status[line["ref"]] = "accepted-unattributed"
             unattributed.append(item)
             if first is None and item["lead"] in conflicting:
                 conflicted.append(item)
@@ -579,7 +658,7 @@ def derive(
         return sum((item[key] for item in items), Decimal("0"))
 
     def refs(items):
-        return {item["ref"] for item in items}
+        return {ref for item in items for ref in item.get("refs", [item["ref"]])}
 
     def joins(items):
         return {ref for item in items for ref in item["crm_refs"]}
@@ -611,7 +690,7 @@ def derive(
         join={ref for item in conflicted for ref in conflicting[item["lead"]]},
     )
     declares_refunds = any(spec["refunds"] != "reject" for spec in specs["revenue"])
-    refund_rows = [item for item in revenue if item["value"] < 0]
+    refund_rows = [line for invoice in revenue for line in invoice["rows"] if line["value"] < 0]
     if declares_refunds:
         claim("EV-REFUND-001", _money(total(refund_rows, "value")), "AED", summand=refs(refund_rows))
 
@@ -755,6 +834,8 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
             raise ReconstructionError("the rule set does not declare valid attribution windows")
         if config and ruleset.get("attribution_windows_days") != windows:
             fail("engagement_config", "the rule set's attribution windows differ from the engagement config")
+        if config and ruleset.get("coverage_threshold_percent") != config["threshold"]:
+            fail("engagement_config", "the rule set's coverage threshold differs from the engagement config")
 
         expected = (
             derive(inputs, windows, config["aliases"], config["join"], config["rule"]) if config else derive(inputs, windows)
@@ -839,6 +920,17 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
             if written != as_csv:
                 fail("exceptions", "exceptions.csv does not match the reconstructed exception groups")
 
+        expected_entries = sum(len(members) for claim in expected["claims"].values() for members in claim["roles"].values())
+        detail = report.get("detail_in_files", {})
+        rows_in_report = len(expected["status"]) <= REPORT_ROW_LIMIT
+        lineage_in_report = expected_entries <= REPORT_LINEAGE_LIMIT
+        if rows_in_report and "dispositions" not in report:
+            fail("claim_lineage", "report.json omits row dispositions that are small enough to publish")
+        if not rows_in_report and detail.get("dispositions") != len(expected["status"]):
+            fail("claim_lineage", "report.json does not say how many row dispositions are in row_dispositions.csv")
+        if not lineage_in_report and detail.get("lineage_entries") != expected_entries:
+            fail("claim_lineage", "report.json does not say how many lineage entries are in lineage.csv")
+
         published = {claim["evidence_id"]: claim for claim in report.get("claims", [])}
         for evidence_id in sorted(set(expected["claims"]) - set(published)):
             fail("claim_values", f"{evidence_id} is missing from the report")
@@ -853,8 +945,11 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
                     "claim_values",
                     f"{evidence_id} is {have.get('value')} {have.get('unit')}, reconstructed {want['value']} {want['unit']}",
                 )
-            if _role_sets(have.get("lineage", [])) != want["roles"]:
-                fail("claim_lineage", f"{evidence_id} lineage in report.json does not match its reconstructed rows")
+            if lineage_in_report:
+                if _role_sets(have.get("lineage", [])) != want["roles"]:
+                    fail("claim_lineage", f"{evidence_id} lineage in report.json does not match its reconstructed rows")
+            elif have.get("lineage_entries") != sum(len(members) for members in want["roles"].values()):
+                fail("claim_lineage", f"{evidence_id} does not state how many lineage rows it has in lineage.csv")
 
         lineage_rows = _read_csv_output(output / "lineage.csv")
         by_claim: dict[str, list] = {}

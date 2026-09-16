@@ -11,7 +11,7 @@
 - Real-shaped exports read through a declared engagement config, rehearsed on
   25,900 public invoices with a synthetic CRM and advertising overlay.
 
-Verified with 127 tests on Python 3.13. CI runs the same suite on Python
+Verified with 135 tests on Python 3.13. CI runs the same suite on Python
 3.11–3.13 for every push.
 
 ## What it does not demonstrate
@@ -28,15 +28,18 @@ Verified with 127 tests on Python 3.13. CI runs the same suite on Python
   dated exchange-rate table.
 - Refunds count only when declared, as negative amounts or a credit-note export.
   Under the three-file contract negative amounts are rejected.
-- Advertising rows have no identifier, so two genuine rows with the same date,
-  campaign, channel and amount count once. The excluded amount stays visible in
+- Advertising rows have no identifier unless the export has one and the config
+  declares it as `row_id`; without it two genuine rows with the same date,
+  campaign, channel and amount count once, with the excluded amount visible in
   `row_dispositions.csv`.
 - Spend and revenue periods are not aligned: channel ROAS divides all attributed
   revenue in the files by all accepted spend.
 - An engagement config maps columns and declares formats. It cannot compute a
-  column (quantity × price), mix date formats or currencies within one file, or
-  total a line-item revenue export.
-- Invoice status is not read: an unpaid invoice in the export counts as revenue.
+  column (quantity × price), or mix date formats or currencies within one file.
+- Line-item exports are summed per invoice when `line_id` is declared. Lines of
+  one invoice that disagree about the customer or date are all held back.
+- Invoice status is read only when an `include_when` filter declares which values
+  to keep; otherwise every row in the export counts, including unpaid invoices.
 - Time of day and time zones are ignored; dates are taken as written.
 - Amounts too large to represent are rejected, but a sum close to Python's
   28-digit decimal precision is not guarded.
@@ -66,6 +69,9 @@ Verified with 127 tests on Python 3.13. CI runs the same suite on Python
   author. A code bug in either is caught; a misreading shared by both is not.
 - The checker verifies the figures and citations in findings, not the rest of
   their wording.
+- `report.json` carries row dispositions and lineage only up to 50,000 rows and
+  200,000 lineage entries; above that they stay in the CSV files, which the
+  checker verifies row by row either way.
 - Exception groups use the engine's reason text. The checker verifies their rows,
   amounts and examples, not the wording; "who can fix it" is a fixed mapping.
 

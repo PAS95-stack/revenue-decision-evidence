@@ -14,9 +14,10 @@ Ask the client for:
 
 1. The export from each system, as CSV: advertising (every ad account), CRM, and
    revenue (invoices or orders).
-2. **One row per invoice or order** in the revenue export. Rows that share an
-   invoice number but differ are treated as a conflict, so line-item exports must
-   be totalled per invoice first.
+2. Either one row per invoice, or a line-item export. For line items, declare
+   `line_id`: lines are summed into their invoice, each line keeps its own row
+   reference, and lines of one invoice that disagree about the customer or date are
+   all held back as a conflict.
 3. Refunds and credit notes: either negative totals in the revenue export, or a
    separate credit-note export.
 4. The currency of each ad account.
@@ -61,6 +62,7 @@ Xero-shaped files.
 | `engagement` | yes | Name shown in the brief |
 | `data_origin` | yes | `client`, `public` or `synthetic`. Sets the brief's status line; `client` also enforces the folder guard |
 | `sources` | yes | `ads`, `crm` and `revenue`, each a list of 1 to 20 files |
+| `coverage_threshold_percent` | no | The coverage below which the report calls attribution weak, as a string such as `"70"`. Default `"80"`. A planning choice, not a validated threshold |
 | `attribution_windows_days` | no | 1 to 5 increasing whole days up to 999. Default `[30, 60, 90]`. Use longer windows for long sales cycles, such as `[90, 180, 365]` |
 | `channel_aliases` | no | Channel names as written, matched without regard to letter case, mapped to the name to report: `{"search": "Paid Search"}` |
 | `revenue_join` | no | `lead_id` (default) or `customer_id` |
@@ -79,8 +81,12 @@ Xero-shaped files.
 | `amounts.currency` | no | `{"code": "USD", "aed_per_unit": "3.6725", "rate_source": "UAE dirham peg to the US dollar"}`. One fixed rate per file, rounded half-up to fils after conversion |
 | `amounts.refunds` | revenue only | `reject` (default), `negative_values` (`-500.00` or `(500.00)` is a refund) or `whole_file` (every row is a refund written as a positive amount) |
 | `uppercase` | no | Identifier fields to upper-case, when one system writes `meta-101` and another `META-101` |
+| `include_when` | no | Keep only rows whose column holds one of these values, compared without regard to letter case: `{"column": "Status", "values": ["PAID"]}`. Excluded rows get the status `filtered`, keep their amount, and are reported as a finding |
+| `columns.row_id` | advertising | The export's own row identifier (ad set ID, ad ID). Without it, two genuinely identical rows count once |
+| `columns.line_id` | revenue | Declares a line-item export: the column identifying the line within an invoice (line number, SKU). Declare it in every revenue file or none |
 
-Fields per export: advertising `date`, `campaign_id`, `channel`, `spend_aed`; CRM
+Fields per export: advertising `date`, `campaign_id`, `channel`, `spend_aed` (and
+optionally `row_id`); CRM
 `lead_id`, `campaign_id`, `created_at`, `status` (plus `customer_id` when revenue joins
 through customers); revenue `transaction_id`, `lead_id` or `customer_id`, `value_aed`,
 `date`.
@@ -100,8 +106,14 @@ the run stops, it prints why:
 | `the revenue export has no usable rows` | Open `outputs/evaluation_results.json`; usually a date or amount format is declared wrongly |
 | `was not logged at intake` or `changed since intake` | Log the file, or ask for a corrected export under a new name |
 
-Check a declaration by looking at the rejected rows: a date format declared wrongly
-rejects nearly every row with `does not match the declared format`.
+Every failure also prints `hints`: the declaration that would have matched the
+rejected rows, for example
+
+```json
+"hints": ["ads/meta_ads.csv: 3 of 3 rejected rows would match date_format \"DD/MM/YYYY\" (declared \"YYYY-MM-DD\")."]
+```
+
+A hint is guidance, never a change: nothing is reinterpreted until the config says so.
 
 ## 5. Read out
 
@@ -110,6 +122,9 @@ rejects nearly every row with `does not match the declared format`.
   declared interpretation.
 - `exceptions.csv`: the full grouped list to send to each owner.
 - `row_dispositions.csv`: every input row with its status, reason and file line.
+
+On a large export, `report.json` points at the CSV files rather than repeating
+them; `lineage.csv` and `row_dispositions.csv` always hold the full detail.
 
 ## 6. Close
 
@@ -132,12 +147,12 @@ exports were synthetic**, because no public dataset links a retailer's customers
 ad campaigns, so the attribution figures say nothing about that retailer. The run
 covered 34,289 rows, took about 7 seconds, and was confirmed by the independent
 checker. Its largest exception was the invoices without a customer ID, which held
-AED 7,093,643.80.
+AED 7,093,643.80. It publishes an 8.9 MB `report.json` beside a 27 MB `lineage.csv`
+holding all 274,801 lineage entries, and a 7 KB brief.
 
 ## What a config cannot express
 
 - More than one date format or currency within one file.
-- Line-item revenue exports. Total them to one row per invoice first.
 - Columns computed from others, such as quantity × unit price.
 - Invoice status: an unpaid invoice counts as revenue if it is in the export.
 - Time zones. The date is taken as written.

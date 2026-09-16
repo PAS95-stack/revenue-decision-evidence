@@ -1319,6 +1319,7 @@
         "accepted-unattributed": 0,
         "conflict": 0,
         "duplicate": 1,
+        "filtered": 0,
         "input": 7,
         "rejected": 1
       },
@@ -1327,6 +1328,7 @@
         "accepted-unattributed": 0,
         "conflict": 2,
         "duplicate": 0,
+        "filtered": 0,
         "input": 8,
         "rejected": 1
       },
@@ -1335,6 +1337,7 @@
         "accepted-unattributed": 4,
         "conflict": 0,
         "duplicate": 1,
+        "filtered": 0,
         "input": 9,
         "rejected": 1
       }

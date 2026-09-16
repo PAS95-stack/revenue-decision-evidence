@@ -9,8 +9,10 @@ from .engine import (
     EvidenceEngine,
     InputContractError,
     clear_outputs,
+    diagnose,
     ensure_outside_repository,
     load_engagement,
+    three_file_engagement,
     write_outputs,
 )
 from .narrative import generate_azure_narrative
@@ -64,9 +66,9 @@ def main(argv: list[str] | None = None) -> int:
                         "the AI narrative sends computed client figures to a model provider; record the client's "
                         "written permission first and add --model-provider-permission-recorded"
                     )
-            report = EvidenceEngine().run_engagement(engagement, as_of=args.as_of)
         else:
-            report = EvidenceEngine().run(args.ads, args.crm, args.revenue, as_of=args.as_of)
+            engagement = three_file_engagement(args.ads, args.crm, args.revenue)
+        report = EvidenceEngine().run_engagement(engagement, as_of=args.as_of)
     except InputContractError as exc:
         print(json.dumps({"status": "FAIL", "failures": [f"inputs: {exc}"]}, indent=2), file=sys.stderr)
         return 2
@@ -80,7 +82,11 @@ def main(argv: list[str] | None = None) -> int:
         "output": args.output,
     }
     if evaluation["status"] != "PASS":
-        print(json.dumps({**result, "failures": evaluation["failures"]}, indent=2), file=sys.stderr)
+        hints = diagnose(engagement, report)
+        payload = {**result, "failures": evaluation["failures"]}
+        if hints:
+            payload["hints"] = hints
+        print(json.dumps(payload, indent=2), file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2))
     return 0

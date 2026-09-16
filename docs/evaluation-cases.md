@@ -2,7 +2,7 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 127 tests, all passing on Python 3.13 on 16 September 2026, in about
+**Result:** 135 tests, all passing on Python 3.13 on 16 September 2026, in about
 two seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
@@ -151,3 +151,11 @@ minimum.
 | f07 | The synthetic case rewritten as messy native exports gives identical figures, statuses and exception totals |
 | f08 | 60 generated datasets under random declared formats: engine and checker never disagree |
 | f09 | Engagement script: a folder inside a checkout, unlogged or changed exports are refused; a logged run publishes; deletion check |
+| f10 | A line-item export becomes invoices without losing the lines: a repeated line is a duplicate, lines of one invoice that disagree are held back, and a negative line is a refund |
+| f11 | A declared filter excludes unpaid invoices, keeps their amount and reports them as a finding |
+| f12 | An advertising row identifier separates genuinely identical rows from duplicates and conflicts |
+| f13 | The coverage threshold comes from the config and changes `run_id` |
+| f14 | An optional identifier must be declared for every file of a source, or none |
+| f15 | A wrongly declared date or amount format is diagnosed with the declaration that would have matched |
+| f16 | Above the published limits the row detail and lineage stay in the CSV files, which keep every row |
+| f17 | A report that drops detail small enough to publish is refused |

@@ -119,6 +119,11 @@ The full procedure, the config reference and what a config cannot express are in
 | `report.html` | The same evidence as a web page |
 | `evaluation_results.json` | Checker result, the checks run, and a SHA-256 hash of each published file |
 
+`report.json` repeats what the CSV files hold. Above 50,000 input rows or 200,000
+lineage entries it states how many of each are in the CSVs instead of repeating
+them, so it stays readable; the checker requires the same rule, so detail cannot
+go missing from a report small enough to hold it.
+
 ## Synthetic result
 
 From `data/synthetic`: accepted spend AED 15,000.00, accepted revenue AED

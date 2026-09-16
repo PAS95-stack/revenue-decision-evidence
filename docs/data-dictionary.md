@@ -31,8 +31,9 @@ run with an error naming the file.
 | `spend_aed` | Amount |
 
 Rows identical in date, campaign, channel and amount count once; later copies are
-`duplicate`. The export has no row identifier, so two genuine but identical spend
-rows cannot be told apart.
+`duplicate`. The export has no row identifier under this contract, so two genuine
+but identical spend rows cannot be told apart; an engagement config can declare the
+export's own `row_id` instead.
 
 ## CRM export
 
@@ -70,7 +71,8 @@ or `last_touch`.
 | `accepted-unattributed` | Valid revenue that cannot be linked to a channel | Revenue totals only |
 | `rejected` | Breaks a value rule | No |
 | `duplicate` | Identical to an earlier row with the same identity | No |
-| `conflict` | Shares an identifier with rows that disagree | No |
+| `conflict` | Shares an identifier with rows that disagree, or is a line of an invoice whose lines disagree | No |
+| `filtered` | Removed by a declared `include_when` filter, such as an unpaid invoice | No |
 
 Row references such as `crm:5` are the physical line where the record starts,
 with the header as line 1. Blank lines and the extra lines of multi-line quoted

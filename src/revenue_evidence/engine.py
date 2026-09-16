@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape
@@ -52,10 +52,13 @@ ACCEPTED_UNATTRIBUTED = "accepted-unattributed"
 REJECTED = "rejected"
 DUPLICATE = "duplicate"
 CONFLICT = "conflict"
-STATUSES = (ACCEPTED, ACCEPTED_UNATTRIBUTED, REJECTED, DUPLICATE, CONFLICT)
+# A row the engagement config excludes by a declared filter, such as an unpaid invoice.
+FILTERED = "filtered"
+STATUSES = (ACCEPTED, ACCEPTED_UNATTRIBUTED, REJECTED, DUPLICATE, CONFLICT, FILTERED)
 INCLUDED_STATUSES = frozenset({ACCEPTED, ACCEPTED_UNATTRIBUTED})
 SEVERITY_BY_STATUS = {
     REJECTED: "rejected",
+    FILTERED: "excluded",
     DUPLICATE: "rejected",
     CONFLICT: "uncertain",
     ACCEPTED_UNATTRIBUTED: "uncertain",
@@ -65,6 +68,12 @@ SOURCE_ORDER = {"ads": 0, "crm": 1, "revenue": 2}
 # How a source row supports a claim. Summands add up to the claim's value;
 # numerator and denominator rows form a ratio; join rows are linkage evidence
 # (such as the CRM lead connecting revenue to a campaign) and carry no amount.
+# report.json repeats what the CSV files hold. On a large export that repetition is
+# what makes it unopenable, so above these sizes the detail stays in the CSVs and the
+# report states how many rows it left there. Both implementations apply the same rule,
+# so an engine cannot quietly drop lineage from a small run.
+REPORT_ROW_LIMIT = 50_000
+REPORT_LINEAGE_LIMIT = 200_000
 LINEAGE_ROLES = ("summand", "numerator", "denominator", "join")
 CONTRIBUTING_ROLES = frozenset({"summand", "numerator", "denominator"})
 
@@ -215,6 +224,9 @@ CUSTOMER_JOIN_FIELDS: dict[str, tuple[str, ...]] = {
     "crm": (*CANONICAL_FIELDS["crm"], "customer_id"),
     "revenue": ("transaction_id", "customer_id", "value_aed", "date"),
 }
+# Fields a file may declare but need not: a row identifier for advertising exports
+# that have one, and a line identifier for line-item revenue exports.
+OPTIONAL_FIELDS = {"ads": ("row_id",), "crm": (), "revenue": ("line_id",)}
 REVENUE_JOINS = ("lead_id", "customer_id")
 # How a customer whose accepted leads came from more than one campaign is credited:
 # not at all, to the earliest lead, or to the latest lead created by the transaction date.
@@ -232,10 +244,10 @@ DATA_ORIGINS = ("synthetic", "public", "client")
 CONFIG_KEYS = frozenset(
     {
         "config_version", "engagement", "data_origin", "attribution_windows_days", "channel_aliases", "revenue_join",
-        "multiple_campaigns", "sources",
+        "multiple_campaigns", "coverage_threshold_percent", "sources",
     }
 )
-FILE_KEYS = frozenset({"file", "columns", "fixed", "date_format", "amounts", "uppercase"})
+FILE_KEYS = frozenset({"file", "columns", "fixed", "date_format", "amounts", "uppercase", "include_when"})
 MAX_FILES_PER_SOURCE = 20
 MAX_WINDOWS = 5
 
@@ -283,6 +295,8 @@ class FileSpec:
     uppercase: frozenset[str] = frozenset()
     # Fields this file must supply; empty means the three-file contract's fields.
     fields: tuple[str, ...] = ()
+    filter_column: str = ""
+    filter_values: tuple[str, ...] = ()
     # Amounts are written in this currency and converted at the declared rate.
     currency: str = "AED"
     aed_per_unit: str = "1"
@@ -296,6 +310,12 @@ class FileSpec:
     @property
     def required(self) -> tuple[str, ...]:
         return self.fields or CANONICAL_FIELDS[self.source]
+
+    def included(self, row: dict[str, Any]) -> bool:
+        """False when a declared filter excludes the row, such as an unpaid invoice."""
+        if not self.filter_column:
+            return True
+        return _text(row, self.filter_column).casefold() in self.filter_values
 
     def read_text(self, row: dict[str, Any], field: str) -> str:
         value = self.fixed[field] if field in self.fixed else _text(row, self.columns[field])
@@ -376,10 +396,15 @@ class Engagement:
     # How revenue reaches a CRM record: through the lead, or through the customer.
     revenue_join: str = "lead_id"
     multiple_campaigns: str = "unattributed"
+    coverage_threshold: str | None = None
 
     @property
     def declared(self) -> bool:
         return self.config_path is not None
+
+    @property
+    def threshold(self) -> str:
+        return self.coverage_threshold or RULESET["coverage_threshold_percent"]
 
     @property
     def declares_refunds(self) -> bool:
@@ -396,6 +421,7 @@ class Engagement:
             "channel_aliases": dict(sorted(self.channel_aliases.items())),
             "revenue_join": self.revenue_join,
             "multiple_campaigns": self.multiple_campaigns,
+            "coverage_threshold_percent": self.threshold,
             "files": [
                 {
                     "source": spec.source,
@@ -410,6 +436,9 @@ class Engagement:
                     "rate_source": spec.rate_source,
                     "refunds": spec.refunds,
                     "uppercase": sorted(spec.uppercase),
+                    "include_when": (
+                        {"column": spec.filter_column, "values": list(spec.filter_values)} if spec.filter_column else None
+                    ),
                 }
                 for source in SOURCES
                 for spec in self.files[source]
@@ -475,6 +504,11 @@ def load_engagement(config_path: str | Path) -> Engagement:
         or windows != sorted(set(windows))
     ):
         fail(f"attribution_windows_days must list 1 to {MAX_WINDOWS} increasing whole days between 1 and 999")
+    threshold = config.get("coverage_threshold_percent")
+    if threshold is not None and (
+        not isinstance(threshold, str) or not PLAIN_DECIMAL.fullmatch(threshold) or not 0 <= Decimal(threshold) <= 100
+    ):
+        fail('coverage_threshold_percent must be a percentage in quotes, such as "70"')
     aliases = config.get("channel_aliases", {})
     if not isinstance(aliases, dict) or not all(
         is_text(key) and is_text(value) and "[" not in value and "]" not in value for key, value in aliases.items()
@@ -531,7 +565,9 @@ def load_engagement(config_path: str | Path) -> Engagement:
                 is_text(value) and "[" not in value and "]" not in value for value in fixed.values()
             ):
                 fail(f"{where}.fixed must map fields to non-empty values without square brackets")
-            wrong = sorted((set(columns) - set(fields)) | (set(fixed) - set(FIXABLE_FIELDS[source])))
+            wrong = sorted(
+                (set(columns) - set(fields) - set(OPTIONAL_FIELDS[source])) | (set(fixed) - set(FIXABLE_FIELDS[source]))
+            )
             if wrong:
                 fail(f"{where} cannot declare {', '.join(wrong)} for the {source} export with revenue_join {join}")
             unclear = sorted(set(columns) & set(fixed)) + [
@@ -580,7 +616,22 @@ def load_engagement(config_path: str | Path) -> Engagement:
             refunds = amounts.get("refunds", "reject")
             if refunds not in REFUND_MODES or (refunds != "reject" and source != "revenue"):
                 fail(f"{where}.amounts.refunds must be one of {', '.join(REFUND_MODES)}; only revenue exports hold refunds")
-            identifiers = [name for name in IDENTIFIER_FIELDS[source] if name in fields]
+            chosen = entry.get("include_when")
+            filter_column, filter_values = "", ()
+            if chosen is not None:
+                if (
+                    not isinstance(chosen, dict)
+                    or set(chosen) != {"column", "values"}
+                    or not is_header(chosen["column"])
+                    or not isinstance(chosen["values"], list)
+                    or not 1 <= len(chosen["values"]) <= 50
+                    or not all(is_text(value) for value in chosen["values"])
+                ):
+                    fail(f"{where}.include_when needs a column and 1 to 50 values to keep, such as "
+                         '{"column": "Status", "values": ["PAID"]}')
+                filter_column = chosen["column"]
+                filter_values = tuple(sorted({value.casefold() for value in chosen["values"]}))
+            identifiers = [name for name in IDENTIFIER_FIELDS[source] if name in fields or name in OPTIONAL_FIELDS[source]]
             uppercase = entry.get("uppercase", [])
             if (
                 not isinstance(uppercase, list)
@@ -592,13 +643,17 @@ def load_engagement(config_path: str | Path) -> Engagement:
             specs.append(
                 FileSpec(
                     source, file_path, label, dict(columns), dict(fixed), date_format, separator, currency_label,
-                    frozenset(uppercase), tuple(fields), code, rate, rate_source, refunds,
+                    frozenset(uppercase), tuple(fields), filter_column, filter_values, code, rate, rate_source, refunds,
                 )
             )
+        for optional in OPTIONAL_FIELDS[source]:
+            declared = [optional in spec.columns for spec in specs]
+            if any(declared) and not all(declared):
+                fail(f"sources.{source}: declare {optional} in every file of the source, or in none")
         files[source] = tuple(specs)
     return Engagement(
         files, tuple(windows), folded, config["engagement"], config["data_origin"], path,
-        hashlib.sha256(raw).hexdigest(), join, rule,
+        hashlib.sha256(raw).hexdigest(), join, rule, threshold,
     )
 
 
@@ -713,6 +768,11 @@ def _dispose(
     dispositions[_ref(source, source_file, source_row)] = RowDisposition(
         source, source_row, record_id, status, reason, "" if amount is None else _money(amount), source_file
     )
+
+
+def _refs(items: Iterable[dict[str, Any]]) -> list[str]:
+    """Every source row behind these invoices; one row each unless the export is line-level."""
+    return [ref for item in items for ref in item["refs"]]
 
 
 def _readable_amount(spec: FileSpec, row: dict[str, Any], field: str) -> Decimal | None:
@@ -846,10 +906,11 @@ class EvidenceEngine:
                 reason = ""
             if reason:
                 unattributed.append(row)
-                _dispose(
-                    dispositions, "revenue", row["source_row"], row["transaction_id"],
-                    ACCEPTED_UNATTRIBUTED, reason, row["value"], row["source_file"],
-                )
+                for line in row["rows"]:
+                    _dispose(
+                        dispositions, "revenue", line["source_row"], row["transaction_id"],
+                        ACCEPTED_UNATTRIBUTED, reason, line["value"], line["source_file"],
+                    )
                 continue
             attributed.append(
                 {
@@ -889,7 +950,7 @@ class EvidenceEngine:
             }
             channel_ads = [row["source_ref"] for row in ads if row["channel"] == channel]
             channel_attributed = [row for row in attributed if row["channel"] == channel]
-            channel_revenue_refs = [row["source_ref"] for row in channel_attributed]
+            channel_revenue_refs = _refs(channel_attributed)
             channel_joins = [ref for row in channel_attributed for ref in row["crm_refs"]]
             channel_revenue = sum((row["value"] for row in channel_attributed), Decimal("0"))
             spend = spend_by_channel[channel]
@@ -953,22 +1014,22 @@ class EvidenceEngine:
                         ids["attributed"], "window_attributed_revenue", _money(within), "AED",
                         "assumption-dependent",
                         f"Attributed revenue received within {window} days of lead creation.",
-                        {"summand": [row["source_ref"] for row in inside], "join": [ref for row in inside for ref in row["crm_refs"]]},
+                        {"summand": _refs(inside), "join": [ref for row in inside for ref in row["crm_refs"]]},
                         attribution_assumption, dimensions,
                     ),
                     _claim(
                         ids["excluded"], "window_excluded_delayed_revenue", _money(attributed_total - within),
                         "AED", "assumption-dependent",
                         f"Attributed revenue received more than {window} days after lead creation.",
-                        {"summand": [row["source_ref"] for row in outside], "join": [ref for row in outside for ref in row["crm_refs"]]},
+                        {"summand": _refs(outside), "join": [ref for row in outside for ref in row["crm_refs"]]},
                         attribution_assumption, dimensions,
                     ),
                 ]
             )
 
         ad_refs = [row["source_ref"] for row in ads]
-        revenue_refs = [row["source_ref"] for row in revenue]
-        attributed_refs = [row["source_ref"] for row in attributed]
+        revenue_refs = _refs(revenue)
+        attributed_refs = _refs(attributed)
         attribution_joins = [ref for row in attributed for ref in row["crm_refs"]]
         claims = [
             _claim(
@@ -1016,7 +1077,7 @@ class EvidenceEngine:
                 "reconciled",
                 "Accepted revenue that could not be assigned to a channel: no accepted or unambiguous CRM lead, "
                 "no accepted advertising campaign, or revenue dated before lead creation.",
-                {"summand": [row["source_ref"] for row in unattributed]},
+                {"summand": _refs(unattributed)},
             ),
             _claim(
                 "EV-CONFLICT-001",
@@ -1027,7 +1088,7 @@ class EvidenceEngine:
                 "Accepted revenue whose CRM lead has contradictory records; excluded from attribution "
                 "instead of letting file order choose a campaign.",
                 {
-                    "summand": [row["source_ref"] for row in conflicted_revenue],
+                    "summand": _refs(conflicted_revenue),
                     "join": [
                         ref
                         for row in conflicted_revenue
@@ -1036,7 +1097,7 @@ class EvidenceEngine:
                 },
             ),
         ]
-        refund_rows = [row for row in revenue if row["value"] < 0]
+        refund_rows = [line for invoice in revenue for line in invoice["rows"] if line["value"] < 0]
         refunded_total = sum((row["value"] for row in refund_rows), Decimal("0"))
         if engagement.declares_refunds:
             claims.append(
@@ -1081,6 +1142,7 @@ class EvidenceEngine:
             _money(unattributed_total),
             _money(conflicted_total),
             sensitivity[0],
+            engagement.threshold,
         )
         fingerprints = {
             (f"{source}/{spec.label}" if spec.label else source): _fingerprint(spec.path)
@@ -1089,6 +1151,7 @@ class EvidenceEngine:
         }
         ruleset = json.loads(json.dumps(RULESET))
         ruleset["attribution_windows_days"] = list(engagement.windows)
+        ruleset["coverage_threshold_percent"] = engagement.threshold
         ruleset_fingerprint = hashlib.sha256(
             json.dumps(ruleset, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -1176,6 +1239,13 @@ class EvidenceEngine:
         aliases = aliases or {}
         valid: list[dict[str, Any]] = []
         for spec, file_index, source_row, row in rows:
+            if not spec.included(row):
+                _dispose(
+                    dispositions, "ads", source_row, spec.read_text(row, "campaign_id") or f"row-{source_row}", FILTERED,
+                    f"{spec.filter_column} is not one of the declared values", _readable_amount(spec, row, "spend_aed"),
+                    spec.label,
+                )
+                continue
             campaign_id = spec.read_text(row, "campaign_id")
             channel = spec.read_text(row, "channel")
             channel = aliases.get(channel.casefold(), channel)
@@ -1186,6 +1256,7 @@ class EvidenceEngine:
                     "campaign_id": campaign_id,
                     "channel": channel,
                     "spend": spec.read_amount(row, "spend_aed"),
+                    "row_id": spec.read_text(row, "row_id") if "row_id" in spec.columns else "",
                     "source_row": source_row,
                     "source_file": spec.label,
                     "source_ref": _ref("ads", spec.label, source_row),
@@ -1193,6 +1264,8 @@ class EvidenceEngine:
                 }
                 if not campaign_id or not channel:
                     raise ValueError("campaign_id and channel are required")
+                if "row_id" in spec.columns and not parsed["row_id"]:
+                    raise ValueError("row_id is required")
                 if any(mark in value for value in (campaign_id, channel) for mark in "[]"):
                     # Labels reach the narrative gate; a bracket could imitate a citation.
                     raise ValueError("campaign_id and channel must not contain square brackets")
@@ -1209,8 +1282,7 @@ class EvidenceEngine:
             channels_by_campaign[row["campaign_id"]].add(row["channel"])
         conflicted = {campaign for campaign, channels in channels_by_campaign.items() if len(channels) > 1}
 
-        accepted: list[dict[str, Any]] = []
-        seen: set[tuple[Any, ...]] = set()
+        remaining: list[dict[str, Any]] = []
         for row in valid:
             if row["campaign_id"] in conflicted:
                 _dispose(
@@ -1218,6 +1290,25 @@ class EvidenceEngine:
                     "campaign_id maps to conflicting channels", row["spend"], row["source_file"],
                 )
                 continue
+            remaining.append(row)
+        if remaining and remaining[0]["row_id"]:
+            # The export identifies each row, so repeated identical rows are only
+            # duplicates when they repeat the same identifier.
+            accepted, _ = _resolve_identity(
+                remaining,
+                key="row_id",
+                signature=lambda row: (row["date"], row["campaign_id"], row["channel"], row["spend"]),
+                dispositions=dispositions,
+                source="ads",
+                duplicate_reason="duplicate advertising row_id",
+                conflict_reason=lambda members: "row_id has conflicting values",
+                amount_field="spend",
+            )
+            return accepted, conflicted
+
+        accepted: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+        for row in remaining:
             signature = (row["date"], row["campaign_id"], row["channel"], row["spend"])
             if signature in seen:
                 _dispose(
@@ -1241,6 +1332,12 @@ class EvidenceEngine:
         """Accepted leads, and the refs of conflicting CRM rows keyed by the revenue join key."""
         valid: list[dict[str, Any]] = []
         for spec, file_index, source_row, row in rows:
+            if not spec.included(row):
+                _dispose(
+                    dispositions, "crm", source_row, spec.read_text(row, "lead_id") or f"row-{source_row}", FILTERED,
+                    f"{spec.filter_column} is not one of the declared values", None, spec.label,
+                )
+                continue
             lead_id = spec.read_text(row, "lead_id")
             campaign_id = spec.read_text(row, "campaign_id")
             customer_id = spec.read_text(row, "customer_id") if customer_join else ""
@@ -1300,16 +1397,29 @@ class EvidenceEngine:
         customer_join: bool = False,
     ) -> list[dict[str, Any]]:
         link = "customer_id" if customer_join else "lead_id"
+        line_items = any("line_id" in spec.columns for spec, _, _, _ in rows)
         valid: list[dict[str, Any]] = []
         for spec, file_index, source_row, row in rows:
+            if not spec.included(row):
+                _dispose(
+                    dispositions, "revenue", source_row, spec.read_text(row, "transaction_id") or f"row-{source_row}",
+                    FILTERED, f"{spec.filter_column} is not one of the declared values",
+                    _readable_amount(spec, row, "value_aed"), spec.label,
+                )
+                continue
             transaction_id = spec.read_text(row, "transaction_id")
             link_id = spec.read_text(row, link)
             record_id = transaction_id or f"row-{source_row}"
             try:
                 if not transaction_id or not link_id:
                     raise ValueError(f"transaction_id and {link} are required")
+                line_id = spec.read_text(row, "line_id") if line_items else ""
+                if line_items and not line_id:
+                    raise ValueError("line_id is required")
                 parsed = {
                     "transaction_id": transaction_id,
+                    "line_id": line_id,
+                    "identity": f"{transaction_id}\x1f{line_id}" if line_items else transaction_id,
                     "link_id": link_id,
                     "value": spec.read_amount(row, "value_aed"),
                     "date": spec.read_date(row, "date"),
@@ -1328,15 +1438,51 @@ class EvidenceEngine:
 
         accepted, _ = _resolve_identity(
             valid,
-            key="transaction_id",
+            key="identity",
             signature=lambda row: (row["link_id"], row["value"], row["date"]),
             dispositions=dispositions,
             source="revenue",
-            duplicate_reason="duplicate transaction_id",
-            conflict_reason=lambda members: "transaction_id has conflicting values",
+            duplicate_reason="duplicate transaction_id and line_id" if line_items else "duplicate transaction_id",
+            conflict_reason=lambda members: (
+                "transaction_id and line_id have conflicting values" if line_items else "transaction_id has conflicting values"
+            ),
             amount_field="value",
         )
-        return accepted
+        if not line_items:
+            return [
+                {**row, "refs": [row["source_ref"]], "rows": [row]}
+                for row in accepted
+            ]
+
+        # One invoice per transaction_id: its lines must agree on who it belongs to and when.
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in accepted:
+            grouped[row["transaction_id"]].append(row)
+        invoices: list[dict[str, Any]] = []
+        for transaction_id, lines in grouped.items():
+            if len({line["link_id"] for line in lines}) > 1 or len({line["date"] for line in lines}) > 1:
+                for line in lines:
+                    _dispose(
+                        dispositions, "revenue", line["source_row"], transaction_id, CONFLICT,
+                        f"transaction_id has conflicting {link} or date across its lines", line["value"], line["source_file"],
+                    )
+                continue
+            first = min(lines, key=lambda line: line["order"])
+            invoices.append(
+                {
+                    "transaction_id": transaction_id,
+                    "link_id": first["link_id"],
+                    "date": first["date"],
+                    "value": sum((line["value"] for line in lines), Decimal("0")),
+                    "order": first["order"],
+                    "source_file": first["source_file"],
+                    "source_row": first["source_row"],
+                    "refs": [line["source_ref"] for line in lines],
+                    "rows": lines,
+                }
+            )
+        invoices.sort(key=lambda invoice: invoice["order"])
+        return invoices
 
     @staticmethod
     def _recommend(
@@ -1346,6 +1492,7 @@ class EvidenceEngine:
         unattributed_aed: str,
         conflicted_aed: str,
         shortest_window: dict[str, Any],
+        coverage_threshold: str = RULESET["coverage_threshold_percent"],
     ) -> dict[str, Any]:
         """Data-quality findings and open questions; never a budget move.
 
@@ -1354,9 +1501,10 @@ class EvidenceEngine:
         output is therefore what the exports substantiate and what must be
         checked next, whatever the coverage.
         """
-        threshold = Decimal(RULESET["coverage_threshold_percent"])
+        threshold = Decimal(coverage_threshold)
         below_threshold = coverage * 100 < threshold
         excluded = Counter(row.status for row in dispositions if row.status in {REJECTED, DUPLICATE, CONFLICT})
+        filtered = [row for row in dispositions if row.status == FILTERED]
         unattributed_reasons = {row.reason for row in dispositions if row.status == ACCEPTED_UNATTRIBUTED}
 
         findings: list[str] = []
@@ -1364,7 +1512,7 @@ class EvidenceEngine:
         if below_threshold:
             findings.append(
                 f"Attribution coverage is {coverage_percent}% [EV-COVER-001], below the rule set's "
-                f"reporting threshold of {RULESET['coverage_threshold_percent']}%."
+                f"reporting threshold of {coverage_threshold}%."
             )
         if Decimal(unattributed_aed) > 0:
             findings.append(
@@ -1382,6 +1530,12 @@ class EvidenceEngine:
                 "conflicting source rows are excluded from every figure; each is listed in row_dispositions.csv."
             )
             questions.append("Can the source systems correct or confirm the rejected, duplicate and conflicting rows?")
+        if filtered:
+            held = sum((Decimal(row.amount_aed) for row in filtered if row.amount_aed), Decimal("0"))
+            findings.append(
+                f"{len(filtered)} rows holding AED {_grouped(_money(held))} were excluded by a declared filter in the "
+                "engagement config; each is listed in row_dispositions.csv."
+            )
         window = shortest_window["attribution_window_days"]
         delayed = shortest_window["excluded_delayed_revenue_aed"]
         if Decimal(delayed) > 0:
@@ -1464,6 +1618,96 @@ def _exceptions(dispositions: list[RowDisposition]) -> list[dict[str, Any]]:
     return items
 
 
+def diagnose(engagement: Engagement, report: EvidenceReport, sample: int = 500) -> list[str]:
+    """Why rows were rejected, and which declaration would have matched them instead.
+
+    Guidance only: it never changes a figure. A single wrong date format rejects
+    almost every row, and without this the only clue is thousands of identical
+    rejections.
+    """
+    rejected: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for row in report.dispositions:
+        if row.status == REJECTED:
+            rejected[(row.source, row.source_file)].append(row.source_row)
+    hints: list[str] = []
+    for (source, label), lines in sorted(rejected.items()):
+        spec = next((item for item in engagement.files[source] if item.label == label), None)
+        if spec is None:
+            continue
+        try:
+            rows = dict(_read_csv(spec))
+        except InputContractError:
+            continue
+        wanted = set(lines[:sample])
+        rows = {line: row for line, row in rows.items() if line in wanted}
+        if not rows:
+            continue
+        name = f"{source}/{label}" if label else source
+        total = len(rows)
+
+        date_field = "created_at" if source == "crm" else "date"
+        values = [spec.read_text(row, date_field) for row in rows.values()]
+        matches = {
+            fmt: sum(1 for value in values if pattern.fullmatch(value)) for fmt, pattern in DATE_FORMATS.items()
+        }
+        best = max(matches, key=lambda fmt: (matches[fmt], fmt == spec.date_format))
+        if matches[best] > matches.get(spec.date_format, 0):
+            hints.append(
+                f"{name}: {matches[best]} of {total} rejected rows would match date_format \"{best}\" "
+                f"(declared \"{spec.date_format}\")."
+            )
+
+        for field in AMOUNT_FIELDS[source]:
+            def parses(candidate: FileSpec) -> int:
+                total_ok = 0
+                for row in rows.values():
+                    try:
+                        candidate.read_amount(row, field)
+                    except ValueError:
+                        continue
+                    total_ok += 1
+                return total_ok
+
+            current = parses(spec)
+            best_spec, best_count = spec, current
+            for separator in ("", ","):
+                for currency_label in ("", spec.currency):
+                    for refunds in (spec.refunds, "negative_values") if source == "revenue" else (spec.refunds,):
+                        candidate = replace(
+                            spec, thousands_separator=separator, currency_label=currency_label, refunds=refunds
+                        )
+                        count = parses(candidate)
+                        if count > best_count:
+                            best_spec, best_count = candidate, count
+            if best_count > current:
+                declared = [
+                    f"thousands_separator \"{best_spec.thousands_separator}\"",
+                    f"currency_label \"{best_spec.currency_label}\"",
+                ]
+                if best_spec.refunds != spec.refunds:
+                    declared.append(f"refunds \"{best_spec.refunds}\"")
+                hints.append(
+                    f"{name}: {best_count} of {total} rejected rows would match {field} with "
+                    + ", ".join(declared)
+                    + "."
+                )
+
+        for field in IDENTIFIER_FIELDS[source]:
+            if field not in spec.columns or field not in spec.required:
+                continue
+            empty = sum(1 for row in rows.values() if not spec.read_text(row, field))
+            if empty == total:
+                hints.append(
+                    f"{name}: every rejected row has an empty {field} in column '{spec.columns[field]}'"
+                    + (
+                        "; if revenue names customers rather than leads, set revenue_join to customer_id."
+                        if source == "revenue" and field == "lead_id"
+                        else "."
+                    )
+                )
+    return hints
+
+
 OUTPUT_NAMES = (
     "report.json",
     "lineage.csv",
@@ -1525,9 +1769,34 @@ def write_outputs(report: EvidenceReport, output_dir: str | Path) -> dict[str, A
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def _report_payload(report: EvidenceReport) -> dict[str, Any]:
+    """The report as published: detail that would make it unopenable stays in the CSVs."""
+    payload = report.to_dict()
+    entries = sum(len(claim.lineage) for claim in report.claims)
+    omitted: dict[str, int] = {}
+    if len(report.dispositions) > REPORT_ROW_LIMIT:
+        payload.pop("dispositions")
+        payload.pop("rejected_records")
+        omitted["dispositions"] = len(report.dispositions)
+        omitted["rejected_records"] = len(report.rejected_records)
+    if entries > REPORT_LINEAGE_LIMIT:
+        for claim in payload["claims"]:
+            claim["lineage_entries"] = len(claim.pop("lineage"))
+            claim.pop("source_refs")
+        omitted["lineage_entries"] = entries
+    if omitted:
+        payload["detail_in_files"] = {
+            **omitted,
+            "row_dispositions": "row_dispositions.csv",
+            "rejected_records_file": "rejected_records.csv",
+            "lineage": "lineage.csv",
+        }
+    return payload
+
+
 def _write_files(report: EvidenceReport, output: Path) -> None:
     (output / "report.json").write_text(
-        json.dumps(report.to_dict(), indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(_report_payload(report), indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
     )
 
     with (output / "rejected_records.csv").open("w", encoding="utf-8", newline="") as handle:

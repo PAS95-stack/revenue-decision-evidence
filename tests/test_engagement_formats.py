@@ -24,6 +24,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from unittest import mock  # noqa: E402
+
+from revenue_evidence import cli, engine, reconstruct  # noqa: E402
 from revenue_evidence.engine import (  # noqa: E402
     REASON_CHRONOLOGY,
     REASON_CONFLICTING_CUSTOMER,
@@ -370,6 +373,164 @@ class EngagementScriptTests(FormatTestCase):
             for path in (folder / part).iterdir():
                 path.unlink()
         self.assertEqual(self.call(module, "deletion-check", str(folder), repository=checkout), 0)
+
+
+class LineItemAndFilterTests(FormatTestCase):
+    """Exports as they actually arrive: one row per order line, unpaid invoices, ad set rows."""
+
+    def build(self, name: str = "lines", threshold: str | None = None, filter_status: bool = True,
+              unattributed_invoice: bool = False) -> Path:
+        folder = self.root / name
+        folder.mkdir()
+        write_csv(folder / "ads.csv", ["Day", "Ad set ID", "Campaign", "Type", "Cost"], [
+            ["2026-07-01", "AS-1", "C-1", "Search", "100"],
+            ["2026-07-01", "AS-2", "C-1", "Search", "100"],
+            ["2026-07-01", "AS-2", "C-1", "Search", "100"],
+            ["2026-07-02", "AS-3", "C-1", "Search", "50"],
+            ["2026-07-02", "AS-3", "C-1", "Search", "60"],
+        ])
+        write_csv(folder / "crm.csv", ["lead_id", "campaign_id", "created_at", "status"], [["L1", "C-1", "2026-07-01", "won"]])
+        orders = [
+            ["INV-1", "1", "L1", "100.00", "2026-07-05", "PAID"],
+            ["INV-1", "2", "L1", "50.00", "2026-07-05", "PAID"],
+            ["INV-2", "1", "L1", "80.00", "2026-07-06", "PAID"],
+            ["INV-2", "2", "L1", "20.00", "2026-07-07", "PAID"],
+            ["INV-3", "1", "L1", "30.00", "2026-07-08", "AUTHORISED"],
+            ["INV-4", "1", "L1", "-25.00", "2026-07-09", "PAID"],
+            ["INV-1", "2", "L1", "50.00", "2026-07-05", "PAID"],
+        ]
+        if unattributed_invoice:
+            # A sale for a lead the CRM does not contain: revenue without attribution.
+            orders.append(["INV-5", "1", "L9", "25.00", "2026-07-10", "PAID"])
+        write_csv(folder / "orders.csv", ["Invoice", "Line", "Lead", "Amount", "Date", "Status"], orders)
+        revenue = {
+            "file": "orders.csv",
+            "columns": {"transaction_id": "Invoice", "line_id": "Line", "lead_id": "Lead", "value_aed": "Amount", "date": "Date"},
+            "amounts": {"refunds": "negative_values"},
+        }
+        if filter_status:
+            revenue["include_when"] = {"column": "Status", "values": ["PAID"]}
+        config = {
+            "config_version": 1, "engagement": "Line items", "data_origin": "synthetic",
+            "sources": {
+                "ads": [{"file": "ads.csv", "columns": {"date": "Day", "row_id": "Ad set ID", "campaign_id": "Campaign",
+                                                        "channel": "Type", "spend_aed": "Cost"}}],
+                "crm": [{"file": "crm.csv", "columns": {name: name for name in ("lead_id", "campaign_id", "created_at", "status")}}],
+                "revenue": [revenue],
+            },
+        }
+        if threshold:
+            config["coverage_threshold_percent"] = threshold
+        (folder / "engagement.json").write_text(json.dumps(config), encoding="utf-8")
+        return folder / "engagement.json"
+
+    def test_f10_line_items_become_invoices_without_losing_the_lines(self):
+        report = self.publish(self.build())
+        rows = {ref(row): row for row in report.dispositions}
+        self.assertEqual(rows["revenue/orders.csv:2"].status, "accepted")
+        self.assertEqual(rows["revenue/orders.csv:8"].status, "duplicate", "the same invoice line twice is a duplicate")
+        for line in (4, 5):
+            self.assertEqual(rows[f"revenue/orders.csv:{line}"].status, "conflict", "lines of one invoice must agree")
+            self.assertIn("across its lines", rows[f"revenue/orders.csv:{line}"].reason)
+        self.assertEqual(report.summary["accepted_revenue_aed"], "125.00", "two lines of INV-1 less the refund")
+        claims = {claim.evidence_id: claim for claim in report.claims}
+        self.assertEqual(claims["EV-REV-001"].source_refs,
+                         ["revenue/orders.csv:2", "revenue/orders.csv:3", "revenue/orders.csv:7"])
+        self.assertEqual(claims["EV-REFUND-001"].value, "-25.00")
+        self.assertEqual(report.summary["attributed_revenue_aed"], "125.00")
+
+    def test_f11_a_declared_filter_excludes_unpaid_invoices_and_says_so(self):
+        report = self.publish(self.build())
+        row = next(row for row in report.dispositions if ref(row) == "revenue/orders.csv:6")
+        self.assertEqual((row.status, row.amount_aed), ("filtered", "30.00"))
+        self.assertIn("Status is not one of the declared values", row.reason)
+        finding = " ".join(report.recommendation["findings"])
+        self.assertIn("excluded by a declared filter", finding)
+        self.assertIn("AED 30.00", finding)
+        unfiltered = self.publish(self.build("unfiltered", filter_status=False), "out2")
+        self.assertEqual(unfiltered.summary["accepted_revenue_aed"], "155.00", "without the filter the unpaid invoice counts")
+
+    def test_f12_an_advertising_row_identifier_separates_genuine_repeats(self):
+        report = self.publish(self.build())
+        rows = {ref(row): row for row in report.dispositions}
+        self.assertEqual([rows[f"ads/ads.csv:{line}"].status for line in range(2, 7)],
+                         ["accepted", "accepted", "duplicate", "conflict", "conflict"])
+        self.assertEqual(report.summary["accepted_spend_aed"], "200.00", "identical rows with different ids both count")
+
+    def test_f13_the_coverage_threshold_comes_from_the_config(self):
+        lenient = self.publish(self.build("lenient", threshold="50", unattributed_invoice=True), "lenient")
+        strict = self.publish(self.build("strict", threshold="99", unattributed_invoice=True), "strict")
+        self.assertEqual(lenient.summary["attribution_coverage_percent"], "83.3")
+        self.assertEqual(lenient.ruleset["coverage_threshold_percent"], "50")
+        self.assertNotIn("below the rule set's reporting threshold", " ".join(lenient.recommendation["findings"]))
+        self.assertIn("below the rule set's reporting threshold", " ".join(strict.recommendation["findings"]))
+        self.assertNotEqual(lenient.run_id, strict.run_id)
+
+    def test_f15_a_wrong_declaration_is_diagnosed_rather_than_left_silent(self):
+        config = self.example()
+        edit_json(config, lambda c: c["sources"]["ads"][0].update(date_format="YYYY-MM-DD"))
+        edit_json(config, lambda c: c["sources"]["ads"][1].update(date_format="DD/MM/YYYY"))
+        edit_json(config, lambda c: c["sources"]["ads"][1]["amounts"].update(thousands_separator=""))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), contextlib.redirect_stdout(io.StringIO()):
+            code = cli.main(["--config", str(config), "--output", str(self.root / "out")])
+        self.assertEqual(code, 2, "no advertising row can be read, so nothing may publish")
+        payload = json.loads(errors.getvalue())
+        hints = " ".join(payload["hints"])
+        self.assertIn('ads/meta_ads.csv: 3 of 3 rejected rows would match date_format "DD/MM/YYYY"', hints)
+        self.assertIn('ads/google_ads.csv', hints)
+        self.assertIn('date_format "YYYY-MM-DD"', hints)
+        self.assertIn('thousands_separator ","', hints)
+
+    def test_f14_optional_identifiers_must_be_declared_for_every_file_of_a_source(self):
+        config = self.build("partial")
+        shutil.copy(config.parent / "orders.csv", config.parent / "orders_2.csv")
+        edit_json(config, lambda c: c["sources"]["revenue"].append({
+            "file": "orders_2.csv",
+            "columns": {"transaction_id": "Invoice", "lead_id": "Lead", "value_aed": "Amount", "date": "Date"},
+        }))
+        with self.assertRaisesRegex(InputContractError, "declare line_id in every file"):
+            load_engagement(config)
+
+
+class ReportSizeTests(FormatTestCase):
+    """report.json repeats the CSVs; on a large export that repetition makes it unopenable."""
+
+    def test_f16_detail_moves_into_the_csv_files_above_the_published_limits(self):
+        report = EvidenceEngine().run_engagement(load_engagement(self.example()))
+        self.assertEqual(write_outputs(report, self.root / "small")["status"], "PASS")
+        small = json.loads((self.root / "small" / "report.json").read_text(encoding="utf-8"))
+        self.assertIn("dispositions", small)
+        self.assertIn("lineage", small["claims"][0])
+        self.assertNotIn("detail_in_files", small)
+
+        limits = [
+            mock.patch.object(module, name, value)
+            for module in (engine, reconstruct)
+            for name, value in (("REPORT_ROW_LIMIT", 2), ("REPORT_LINEAGE_LIMIT", 5))
+        ]
+        with contextlib.ExitStack() as stack:
+            for limit in limits:
+                stack.enter_context(limit)
+            evaluation = write_outputs(report, self.root / "large")
+        self.assertEqual(evaluation["status"], "PASS", evaluation["failures"])
+        large = json.loads((self.root / "large" / "report.json").read_text(encoding="utf-8"))
+        self.assertNotIn("dispositions", large)
+        self.assertNotIn("rejected_records", large)
+        self.assertEqual(large["detail_in_files"]["dispositions"], len(report.dispositions))
+        self.assertEqual(large["claims"][0]["lineage_entries"], len(report.claims[0].lineage))
+        self.assertEqual(
+            len((self.root / "large" / "lineage.csv").read_text(encoding="utf-8").splitlines()),
+            len((self.root / "small" / "lineage.csv").read_text(encoding="utf-8").splitlines()),
+            "the evidence itself is unchanged; only its repetition in report.json goes",
+        )
+
+    def test_f17_a_report_that_drops_detail_it_could_publish_is_refused(self):
+        report = EvidenceEngine().run_engagement(load_engagement(self.example()))
+        with mock.patch.object(engine, "REPORT_ROW_LIMIT", 2), mock.patch.object(engine, "REPORT_LINEAGE_LIMIT", 5):
+            evaluation = write_outputs(report, self.root / "out")
+        self.assertEqual(evaluation["status"], "FAIL")
+        self.assertTrue(any("omits row dispositions" in failure for failure in evaluation["failures"]), evaluation["failures"])
 
 
 if __name__ == "__main__":
