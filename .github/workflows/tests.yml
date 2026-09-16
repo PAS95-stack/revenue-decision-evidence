@@ -36,3 +36,11 @@ jobs:
             --crm data/synthetic/crm.csv \
             --revenue data/synthetic/revenue.csv \
             --output outputs/synthetic-case
+      - name: Run the messy exports engagement example and verify it independently
+        run: |
+          PYTHONPATH=src python -m revenue_evidence.cli \
+            --config examples/messy-exports/engagement.json \
+            --output "$RUNNER_TEMP/example"
+          python -I src/revenue_evidence/reconstruct.py \
+            --config examples/messy-exports/engagement.json \
+            --output "$RUNNER_TEMP/example"

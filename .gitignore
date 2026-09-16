@@ -6,3 +6,9 @@ outputs/*
 !outputs/.gitkeep
 !outputs/synthetic-case/
 !outputs/synthetic-case/**
+
+# Client exports and engagement folders never belong in this repository.
+data/*
+!data/synthetic/
+!data/synthetic/**
+engagements/

@@ -1,5 +1,10 @@
 # Data contract and dictionary
 
+This page describes the three-file contract used by the synthetic case. Exports
+with other column names or formats, several files per source, other currencies,
+refunds, or revenue that names customers are read through an engagement config;
+see [`engagements.md`](engagements.md).
+
 Exactly three CSV exports, UTF-8 (a byte-order mark is allowed), with a header
 row. Extra columns are ignored. Real-data files must be approved, minimised,
 pseudonymised, encrypted in transit and at rest, access-logged and deleted on the
@@ -26,8 +31,9 @@ run with an error naming the file.
 | `spend_aed` | Amount |
 
 Rows identical in date, campaign, channel and amount count once; later copies are
-`duplicate`. The export has no row identifier, so two genuine but identical spend
-rows cannot be told apart.
+`duplicate`. The export has no row identifier under this contract, so two genuine
+but identical spend rows cannot be told apart; an engagement config can declare the
+export's own `row_id` instead.
 
 ## CRM export
 
@@ -52,6 +58,11 @@ lead's campaign has accepted spend, and the revenue is not dated before the
 lead's creation. Otherwise it is `accepted-unattributed`: counted in revenue, not
 in attribution.
 
+With `revenue_join: customer_id`, revenue joins every accepted CRM lead of its
+customer. The earliest lead dates the relationship. A customer whose leads came
+from several campaigns stays unattributed unless the config declares `first_touch`
+or `last_touch`.
+
 ## Row statuses
 
 | Status | Meaning | Counts toward figures |
@@ -60,11 +71,17 @@ in attribution.
 | `accepted-unattributed` | Valid revenue that cannot be linked to a channel | Revenue totals only |
 | `rejected` | Breaks a value rule | No |
 | `duplicate` | Identical to an earlier row with the same identity | No |
-| `conflict` | Shares an identifier with rows that disagree | No |
+| `conflict` | Shares an identifier with rows that disagree, or is a line of an invoice whose lines disagree | No |
+| `filtered` | Removed by a declared `include_when` filter, such as an unpaid invoice | No |
 
 Row references such as `crm:5` are the physical line where the record starts,
 with the header as line 1. Blank lines and the extra lines of multi-line quoted
-fields are counted.
+fields are counted. In an engagement the reference includes the file:
+`crm/hubspot_contacts.csv:5`.
+
+A rejected row shows its amount in `row_dispositions.csv` when that amount can
+still be read, so the exceptions report can say what the row holds. It never
+enters a figure.
 
 ## Evidence IDs
 
@@ -76,6 +93,7 @@ fields are counted.
 | `EV-COVER-001` | Attributed revenue as a percentage of accepted revenue |
 | `EV-UNMATCH-001` | Accepted revenue that could not be attributed |
 | `EV-CONFLICT-001` | Part of that revenue whose lead has contradictory CRM records |
+| `EV-REFUND-001` | Refunds and credit notes netted into revenue, as a negative amount; only when the engagement declares refunds |
 | `EV-CHSPEND-nnn`, `EV-CHATTR-nnn`, `EV-CHROAS-nnn` | Spend, attributed revenue and ROAS per channel, numbered by sorted channel name |
 | `EV-WINATTR-ddd`, `EV-WINEXCL-ddd` | Revenue attributed within, and received after, a window of `ddd` days |
 
@@ -97,5 +115,5 @@ fields are counted.
 ## Rule set
 
 Published in every `report.json` with a fingerprint: attribution windows of 30,
-60 and 90 days, and an 80% coverage reporting threshold. Both are planning
+60 and 90 days (or those an engagement config declares), and an 80% coverage reporting threshold. Both are planning
 choices, not validated thresholds.

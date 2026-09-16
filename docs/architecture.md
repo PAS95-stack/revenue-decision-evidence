@@ -1,9 +1,12 @@
 # Architecture
 
 ```text
-ads.csv ────┐
-crm.csv ────┼─> read, keeping each record's physical start line
-revenue.csv ┘                    │
+exports ──> engagement config (optional): columns, formats, currencies,
+            refunds, customer join, windows; declared, never guessed
+                                 │
+                                 v
+        read, keeping each record's file and physical start line
+                                 │
                                  v
                    validate every row against the contract
                                  │
@@ -39,7 +42,8 @@ revenue.csv ┘                    │
 | `engine.py` | Reads exports, assigns row statuses, computes figures and lineage, builds findings and questions, writes and gates outputs |
 | `reconstruct.py` | Independent checker. Standard library only; never imports the engine. Runs on its own against any output folder |
 | `narrative.py` | Optional Azure OpenAI call and the gate that binds every number in a narrative to the evidence it cites |
-| `cli.py` | Command line: clears previous outputs, runs, publishes, and sets the exit code |
+| `cli.py` | Command line: clears previous outputs, runs, publishes, and sets the exit code; refuses client data inside the repository |
+| `scripts/engagement.py` | Engagement folder: intake log with SHA-256, runs only logged and unchanged exports, deletion check |
 
 ## Why two implementations
 
@@ -52,7 +56,8 @@ would not; see [`limitations.md`](limitations.md).
 ## Identity and repeatability
 
 `run_id` is a hash of the engine version, the full rule-set content, the optional
-as-of date and the SHA-256 of each input file. The wall clock is never read, JSON
+as-of date, the SHA-256 of each input file and, in an engagement, the SHA-256 of
+the config. The wall clock is never read, JSON
 keys are sorted, and line endings of committed files are pinned in
 `.gitattributes`.
 
