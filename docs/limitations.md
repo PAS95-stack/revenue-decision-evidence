@@ -14,7 +14,7 @@
   closed deals and 112,650 real order lines joined through customers, with the
   advertising spend a declared overlay because that dataset publishes none.
 
-Verified with 138 tests on Python 3.13. CI runs the same suite on Python
+Verified with 153 tests on Python 3.13. CI runs the same suite on Python
 3.11–3.13 for every push.
 
 ## What it does not demonstrate
@@ -47,8 +47,13 @@ Verified with 138 tests on Python 3.13. CI runs the same suite on Python
   one invoice that disagree about the customer or date are all held back.
 - Invoice status is read only when an `include_when` filter declares which values
   to keep; otherwise every row in the export counts, including unpaid invoices.
-- Time of day is ignored and a date is taken as written, unless the file declares
-  `time_zone_shift_hours`, which moves a timestamp into the day it belongs to.
+- A date is read in whatever shape the file declares, including month names and
+  two-digit years, and converted to the one calendar date every figure uses. Time
+  of day is otherwise ignored, unless the value carries its own UTC offset (`Z` or
+  `+04:00`), or the file declares `time_zone_shift_hours`: then the instant is
+  moved into the day it belongs to. The tool reads many shapes but never decides
+  between two readings of one value; an ambiguous file is refused or settled by a
+  person.
 - A run reads only what the config declares; it detects nothing. Separators are
   `comma`, `semicolon` or `tab`, and encodings UTF-8, UTF-16, Windows-1252 or
   Latin-1. `propose` reads the exports beforehand and drafts those declarations

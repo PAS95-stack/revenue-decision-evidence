@@ -2,7 +2,7 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 148 tests, all passing on Python 3.13 on 16 September 2026, in about
+**Result:** 153 tests, all passing on Python 3.13 on 16 September 2026, in about
 three seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
@@ -172,3 +172,8 @@ minimum.
 | f28 | European amounts (`1.234,56`) and a currency symbol beside the number are read when declared, refunds included |
 | f29 | The draft detects a title row, a semicolon file, a European amount with its symbol, and snake_case column names |
 | f30 | A computed total declares the number format of its parts, and the drafted config runs |
+| f31 | Month names and two-digit years are read when declared, and every figure and window is unchanged |
+| f32 | The draft reads a month-name date shape from the values themselves |
+| f33 | A value carrying its own UTC offset moves to the day it belongs to; a day-first and month-first pair is refused whatever separator it uses, while a year-first shape is never ambiguous |
+| f34 | One command creates the folder, records every export at intake, drafts the config and runs it, reproducing the worked example's figures |
+| f35 | The same command refuses to run when the draft still needs a person, and publishes nothing |

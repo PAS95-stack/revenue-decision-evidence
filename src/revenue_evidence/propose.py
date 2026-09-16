@@ -30,6 +30,7 @@ from .engine import (
     DELIMITERS,
     ENCODINGS,
     FileSpec,
+    numeric_order,
 )
 
 # Characters that belong to a written number, so anything else beside it is a label.
@@ -37,7 +38,7 @@ NUMBER_CHARACTERS = "0123456789.,-() "
 MAX_PREAMBLE_ROWS = 6
 
 SAMPLE_ROWS = 1000
-SLASH_DATE = re.compile(r"([0-9]{1,2})/([0-9]{1,2})/[0-9]{4}")
+NUMERIC_DATE = re.compile(r"([0-9]{1,2})[-/.]([0-9]{1,2})[-/.][0-9]{2,4}")
 # Header words that name each field in the exports these systems produce.
 FIELD_WORDS: dict[str, tuple[str, ...]] = {
     "date": ("reporting starts", "day", "date", "week", "month", "timestamp"),
@@ -120,6 +121,18 @@ def _matched(header: str, words: tuple[str, ...]) -> tuple[int, str]:
     return best, matched
 
 
+def unresolved(report: str) -> list[str]:
+    """The lines of a draft report a person must settle before a run.
+
+    The report explains itself, so the words "needs you" also appear in its own
+    instructions; only the table rows and the missing-export lines are decisions.
+    """
+    return [
+        line for line in report.split("\n")
+        if NEEDS_YOU in line and (line.startswith("|") or line.startswith(NEEDS_YOU))
+    ]
+
+
 def _score(header: str, words: tuple[str, ...]) -> int:
     return _matched(header, words)[0]
 
@@ -199,20 +212,20 @@ def _fraction(rows: list[dict[str, str]], spec: FileSpec, field_name: str, reade
 
 
 def _day_order(export: Export) -> str:
-    """DD/MM or MM/DD, decided by any value in the file where one position exceeds 12."""
+    """Day-first or month-first, decided by any value in the file where one position exceeds 12."""
     day_first = month_first = 0
     for row in export.rows:
         for header in export.headers:
-            match = SLASH_DATE.fullmatch((row.get(header) or "").strip()[:10])
+            match = NUMERIC_DATE.match((row.get(header) or "").strip())
             if match is None:
                 continue
             first, second = int(match.group(1)), int(match.group(2))
             day_first += first > 12 >= second
             month_first += second > 12 >= first
     if day_first and not month_first:
-        return "DD/MM/YYYY"
+        return "day-first"
     if month_first and not day_first:
-        return "MM/DD/YYYY"
+        return "month-first"
     return ""
 
 
@@ -229,24 +242,22 @@ def _date_declaration(export: Export, header: str, field_name: str) -> tuple[lis
     scored.reverse()
     best = scored[0][0]
     tied = [name for share, name in scored if share == best]
-    families = {name.split(" ")[0].split("T")[0] for name in tied}
     note = ""
     chosen = [tied[0]]
-    if {"DD/MM/YYYY", "MM/DD/YYYY"} <= families:
+    if {"day-first", "month-first"} <= {numeric_order(name) for name in tied}:
         decided = _day_order(export)
-        suffix = tied[0][len(tied[0].split(" ")[0].split("T")[0]):]
         if decided:
-            chosen = [decided + suffix]
-            note = f"{decided} because another value in this file has a day above 12"
+            chosen = [next(name for name in tied if numeric_order(name) == decided)]
+            note = f"{chosen[0]} because another value in this file has a day above 12"
         else:
-            chosen = ["DD/MM/YYYY" + suffix]
-            note = (f"{NEEDS_YOU}: every sampled value fits both DD/MM/YYYY and MM/DD/YYYY; DD/MM/YYYY is proposed. "
-                    "Confirm which the system writes")
+            chosen = [next(name for name in tied if numeric_order(name) == "day-first")]
+            note = (f"{NEEDS_YOU}: every sampled value reads as both a day-first and a month-first date; "
+                    f"{chosen[0]} is proposed. Confirm which the system writes")
     if best < 1.0 and not note:
         for share, name in scored[1:]:
             if share == 0:
                 break
-            if {"DD/MM/YYYY", "MM/DD/YYYY"} <= {item.split(" ")[0].split("T")[0] for item in chosen + [name]}:
+            if {"day-first", "month-first"} <= {numeric_order(item) for item in chosen + [name]}:
                 continue
             combined = FileSpec("ads", Path("x"), "x", {field_name: header}, {},
                                 date_formats=tuple(chosen + [name]), fields=(field_name,))

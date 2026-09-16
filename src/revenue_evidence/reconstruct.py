@@ -139,10 +139,6 @@ def _limited(items) -> str:
 # own code; the engine's interpretation must produce the same values.
 
 DEFAULT_WINDOWS = [30, 60, 90]
-DATE_FORMAT_NAMES = tuple(
-    f"{day}{time}" for day in ("YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY") for time in ("", " HH:MM", " HH:MM:SS")
-) + ("YYYY-MM-DDTHH:MM:SS",)
-ISO_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?", re.ASCII)
 CUSTOMER_REQUIRED = {
     "ads": ("date", "campaign_id", "channel", "spend_aed"),
     "crm": ("lead_id", "campaign_id", "created_at", "status", "customer_id"),
@@ -176,42 +172,179 @@ def _field(row: dict, spec: dict, name: str) -> str:
     return value.upper() if name in spec["uppercase"] else value
 
 
+MONTH_NUMBERS: dict[str, int] = {}
+for _index, _name in enumerate(
+    ("january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"), start=1
+):
+    MONTH_NUMBERS[_name] = _index
+    MONTH_NUMBERS[_name[:3]] = _index
+MONTH_NUMBERS["sept"] = 9
+CENTURY_BREAK = 69
+FORMAT_SEPARATORS = "-/., :"
+DAY_TOKENS = ("YYYY", "YY", "MMMM", "MMM", "MM", "M", "DD", "D")
+TIME_TOKENS = ("HH", "H", "MM", "SS", "AM")
+# Digits each token takes: the engine says the same with regular expressions, this by
+# walking the characters, so agreement is two methods meeting rather than one repeated.
+TOKEN_DIGITS = {"YYYY": (4, 4), "YY": (2, 2), "MM": (1, 2), "M": (1, 2), "DD": (1, 2), "D": (1, 2),
+                "HH": (1, 2), "H": (1, 2), "MI": (2, 2), "SS": (2, 2)}
+
+
+def _split_written_format(fmt: str) -> tuple[str, str, str]:
+    for index, character in enumerate(fmt):
+        if character in ("T", " ") and fmt[index + 1: index + 2] == "H":
+            return fmt[:index], character, fmt[index + 1:]
+    return fmt, "", ""
+
+
+def _written_pieces(part: str, tokens: tuple[str, ...]) -> list[str] | None:
+    pieces: list[str] = []
+    index = 0
+    while index < len(part):
+        for token in tokens:
+            if part.startswith(token, index):
+                pieces.append(token)
+                index += len(token)
+                break
+        else:
+            if part[index] not in FORMAT_SEPARATORS:
+                return None
+            pieces.append(part[index])
+            index += 1
+    return pieces
+
+
+def _is_written_format(name: str) -> bool:
+    """Whether a declared format is built from the parts a date is written from."""
+    day_part, _joiner, time_part = _split_written_format(name)
+    day_pieces = _written_pieces(day_part, DAY_TOKENS) if day_part else None
+    if day_pieces is None:
+        return False
+    kinds = [piece for piece in day_pieces if piece in DAY_TOKENS]
+    if len(kinds) != 3 or [sum(1 for kind in kinds if kind.startswith(c)) for c in "YMD"] != [1, 1, 1]:
+        return False
+    if not time_part:
+        return True
+    time_pieces = _written_pieces(time_part, TIME_TOKENS)
+    if time_pieces is None:
+        return False
+    named = [piece for piece in time_pieces if piece in TIME_TOKENS]
+    return named[:2] in (["HH", "MM"], ["H", "MM"])
+
+
+def _numeric_order(name: str) -> str:
+    """Day-first or month-first; empty when the month is named or the year comes first."""
+    day_part, _joiner, _time = _split_written_format(name)
+    kinds = [piece for piece in (_written_pieces(day_part, DAY_TOKENS) or []) if piece in DAY_TOKENS]
+    if any(kind.startswith("MMM") for kind in kinds) or (kinds and kinds[0].startswith("Y")):
+        return ""
+    for kind in kinds:
+        if kind.startswith("D"):
+            return "day-first"
+        if kind.startswith("M"):
+            return "month-first"
+    return ""
+
+
 def _one_declared_date(text: str, fmt: str, shift: int) -> date | None:
-    hour = minute = 0
-    if fmt == "YYYY-MM-DDTHH:MM:SS":
-        if not ISO_DATETIME.fullmatch(text):
-            return None
-        day_text, hour, minute = text[:10], int(text[11:13]), int(text[14:16])
-    else:
-        day_format, _, time_format = fmt.partition(" ")
-        day_text, _, time_text = text.partition(" ")
-        if bool(time_format) != bool(time_text):
-            return None
-        if time_format:
-            pieces = time_text.split(":")
-            if (
-                len(pieces) != time_format.count(":") + 1
-                or not all(piece.isascii() and piece.isdigit() for piece in pieces)
-                or not 1 <= len(pieces[0]) <= 2
-                or any(len(piece) != 2 for piece in pieces[1:])
-            ):
-                return None
-            hour, minute = int(pieces[0]), int(pieces[1])
-        if day_format != "YYYY-MM-DD":
-            parts = day_text.split("/")
-            if len(parts) != 3 or not all(part.isascii() and part.isdigit() for part in parts):
-                return None
-            first, second, year = parts
-            if not (1 <= len(first) <= 2 and 1 <= len(second) <= 2 and len(year) == 4):
-                return None
-            day, month = (first, second) if day_format == "DD/MM/YYYY" else (second, first)
-            day_text = f"{year}-{int(month):02d}-{int(day):02d}"
-    calendar = _day(day_text)
-    if calendar is None:
+    day_part, joiner, time_part = _split_written_format(fmt)
+    day_pieces = _written_pieces(day_part, DAY_TOKENS)
+    time_pieces = _written_pieces(time_part, TIME_TOKENS) if time_part else []
+    if day_pieces is None or time_pieces is None:
         return None
-    if not shift:
-        return calendar
-    return (datetime(calendar.year, calendar.month, calendar.day, hour, minute) + timedelta(hours=shift)).date()
+    time_pieces = ["MI" if piece == "MM" else piece for piece in time_pieces]
+    found: dict[str, int] = {}
+    index = 0
+
+    def take(piece: str, position: int) -> int:
+        if piece in ("MMM", "MMMM"):
+            start = position
+            while position < len(text) and text[position].isalpha() and position - start < 9:
+                position += 1
+            month = MONTH_NUMBERS.get(text[start:position].lower())
+            if month is None or position - start < 3:
+                return -1
+            found["month"] = month
+            return position
+        if piece == "AM":
+            half = text[position: position + 2].lower().replace(".", "")
+            if text[position: position + 1].lower() not in ("a", "p"):
+                return -1
+            position += 1
+            if text[position: position + 1] == ".":
+                position += 1
+            if text[position: position + 1].lower() != "m":
+                return -1
+            position += 1
+            if text[position: position + 1] == ".":
+                position += 1
+            found["afternoon"] = 1 if half[:1] == "p" else 0
+            return position
+        if piece in TOKEN_DIGITS:
+            low, high = TOKEN_DIGITS[piece]
+            start = position
+            while position < len(text) and text[position].isascii() and text[position].isdigit() \
+                    and position - start < high:
+                position += 1
+            if position - start < low:
+                return -1
+            value = int(text[start:position])
+            key = {"YYYY": "year", "YY": "short_year", "MM": "month", "M": "month", "DD": "day",
+                   "D": "day", "HH": "hour", "H": "hour", "MI": "minute", "SS": "second"}[piece]
+            found[key] = value
+            return position
+        if text[position: position + 1] != piece:
+            return -1
+        return position + 1
+
+    for piece in day_pieces:
+        index = take(piece, index)
+        if index < 0:
+            return None
+    if time_part:
+        if text[index: index + 1] != joiner:
+            return None
+        index += 1
+        for piece in time_pieces:
+            index = take(piece, index)
+            if index < 0:
+                return None
+        if "SS" in time_pieces and text[index: index + 1] == ".":
+            index += 1
+            start = index
+            while index < len(text) and text[index].isdigit():
+                index += 1
+            if index == start:
+                return None
+    rest = text[index:]
+    zone = rest[1:] if rest[:1] == " " else rest
+    offset_minutes = 0
+    if zone:
+        if zone in ("Z", "z"):
+            offset_minutes = 0
+        else:
+            digits = zone.replace(":", "")
+            if len(digits) != 5 or digits[0] not in "+-" or not digits[1:].isdigit():
+                return None
+            offset_minutes = int(digits[1:3]) * 60 + int(digits[3:5])
+            if digits[0] == "-":
+                offset_minutes = -offset_minutes
+    year = found.get("year")
+    if year is None and "short_year" in found:
+        short = found["short_year"]
+        year = 1900 + short if short >= CENTURY_BREAK else 2000 + short
+    hour = found.get("hour", 0)
+    if "afternoon" in found:
+        if not 1 <= hour <= 12:
+            return None
+        hour = (hour % 12) + (12 if found["afternoon"] else 0)
+    try:
+        moment = datetime(year, found["month"], found["day"], hour, found.get("minute", 0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if zone:
+        moment -= timedelta(minutes=offset_minutes)
+    return (moment + timedelta(hours=shift)).date() if shift else moment.date()
 
 
 def _declared_date(text: str, formats, shift: int = 0) -> date | None:
@@ -366,7 +499,9 @@ def _load_config(path) -> dict:
             date_formats = entry.get("date_format", "YYYY-MM-DD")
             date_formats = [date_formats] if isinstance(date_formats, str) else date_formats
             need(
-                isinstance(date_formats, list) and date_formats and all(name in DATE_FORMAT_NAMES for name in date_formats),
+                isinstance(date_formats, list) and date_formats
+                and all(isinstance(name, str) and _is_written_format(name) for name in date_formats)
+                and not {"day-first", "month-first"} <= {_numeric_order(name) for name in date_formats},
                 f"{label}: unknown date_format",
             )
             shift = entry.get("time_zone_shift_hours", 0)

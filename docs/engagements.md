@@ -25,6 +25,24 @@ Ask the client for:
 6. Pseudonymous identifiers only: no names, emails, phone numbers, free text or
    health details (see `governance.md`).
 
+## The short way
+
+One command does the whole journey. It creates the folder if it is new, converts any
+spreadsheets, records what arrived, drafts the config from the exports themselves, and
+runs when nothing is left for a person to decide:
+
+```bash
+python3 scripts/engagement.py ingest ~/engagements/acme-2026-09 --received-on 2026-09-16 --received-from "Finance manager"
+```
+
+The first call creates the folder and asks for the exports. Put them in `inputs/` and
+repeat it. The draft is printed with the evidence for every choice; anything the data
+cannot settle is listed as a decision for you, and the run does not start until you have
+settled it. Add `--accept-draft` to run straight away when the draft needs no decisions.
+
+The numbered steps below are the same journey done one piece at a time, and remain the
+way to re-run an engagement, change a declaration, or close it.
+
 ## 1. Create the engagement folder
 
 It must be outside this repository; the script and the CLI refuse otherwise.
@@ -107,7 +125,7 @@ Google Ads, HubSpot and Xero-shaped files.
 | `delimiter` | no | `comma` (default), `semicolon` (Excel in many locales) or `tab` |
 | `encoding` | no | `utf-8` (default, byte-order mark allowed), `utf-16`, `windows-1252` or `latin-1` |
 | `header_row` | no | The line the column names sit on, 1 by default. Advertising platforms print a report title and a date range above them; declare `3` rather than editing the export. Row references stay the lines of the file as delivered |
-| `date_format` | no | One of `YYYY-MM-DD` (default), `DD/MM/YYYY`, `MM/DD/YYYY`, each optionally followed by ` HH:MM` or ` HH:MM:SS`, or `YYYY-MM-DDTHH:MM:SS`. A list declares several for one file, tried in order: `["YYYY-MM-DD", "DD/MM/YYYY"]`. Two formats that would read one value as two different dates are refused, so an ambiguous export must be settled by a person |
+| `date_format` | no | How this file writes a date, built from `YYYY`, `YY`, `MMMM` (July), `MMM` (Jul), `MM`, `M`, `DD` and `D` with the separators `-` `/` `.` and space: `YYYY-MM-DD` (default), `DD/MM/YYYY`, `DD.MM.YYYY`, `D MMM YYYY`, `MMM D, YYYY`, `DD-MMM-YY` and so on. Add a time as ` HH:MM`, ` HH:MM:SS`, `THH:MM:SS` or ` HH:MM AM`; a value may also carry `Z` or `+04:00`, and then the instant is converted before the day is taken. Two-digit years read 69–99 as the 1900s and 00–68 as the 2000s. A list declares several for one file, tried in order. Declaring both a day-first and a month-first numeric shape is refused, because `03/07/2026` would be two dates |
 | `time_zone_shift_hours` | no | Whole hours from −14 to 14 added before the day is taken, for an export written in another time zone. Every declared `date_format` must carry a time |
 | `amounts.thousands_separator` | no | `","` or `""` with a decimal point; `"."` or `""` with a decimal comma |
 | `amounts.decimal` | no | `point` (default) reads `1,234.56`; `comma` reads `1.234,56`, as Excel writes it in many locales |

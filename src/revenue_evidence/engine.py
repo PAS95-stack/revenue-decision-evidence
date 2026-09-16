@@ -263,27 +263,121 @@ FILE_KEYS = frozenset(
 MAX_FILES_PER_SOURCE = 20
 MAX_WINDOWS = 5
 
-# Date formats an engagement config may declare. Each file declares exactly one, so
-# 03/07/2026 is never read as both 3 July and 7 March. A time of day, when the format
-# includes one, is matched and then ignored: only the calendar date as written is used.
-_DAY_PATTERNS = {
-    "YYYY-MM-DD": r"(?P<y>[0-9]{4})-(?P<m>[0-9]{2})-(?P<d>[0-9]{2})",
-    "DD/MM/YYYY": r"(?P<d>[0-9]{1,2})/(?P<m>[0-9]{1,2})/(?P<y>[0-9]{4})",
-    "MM/DD/YYYY": r"(?P<m>[0-9]{1,2})/(?P<d>[0-9]{1,2})/(?P<y>[0-9]{4})",
+# How a written date is read. A config declares the shape a file uses, built from these
+# parts, and every shape is converted to the one calendar date the report works in. The
+# declaration is what makes 03/07/2026 a single date rather than both 3 July and 7 March:
+# the tool reads many shapes, but it never decides between two readings of one value.
+MONTH_NUMBERS: dict[str, int] = {}
+for _index, _name in enumerate(
+    ("january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"), start=1
+):
+    MONTH_NUMBERS[_name] = _index
+    MONTH_NUMBERS[_name[:3]] = _index
+MONTH_NUMBERS["sept"] = 9
+# Two-digit years: 69 to 99 are the 1900s, 00 to 68 are the 2000s, as POSIX has it.
+CENTURY_BREAK = 69
+_DATE_TOKENS = {
+    "YYYY": r"(?P<y>[0-9]{4})",
+    "YY": r"(?P<yy>[0-9]{2})",
+    "MMMM": r"(?P<name>[A-Za-z]{3,9})",
+    "MMM": r"(?P<name>[A-Za-z]{3,9})",
+    "MM": r"(?P<m>[0-9]{1,2})",
+    "M": r"(?P<m>[0-9]{1,2})",
+    "DD": r"(?P<d>[0-9]{1,2})",
+    "D": r"(?P<d>[0-9]{1,2})",
 }
-_TIME_PATTERNS = {
-    "": "",
-    " HH:MM": r" (?P<H>[0-9]{1,2}):(?P<M>[0-9]{2})",
-    " HH:MM:SS": r" (?P<H>[0-9]{1,2}):(?P<M>[0-9]{2}):[0-9]{2}",
+_TIME_TOKENS = {
+    "HH": r"(?P<H>[0-9]{1,2})",
+    "H": r"(?P<H>[0-9]{1,2})",
+    "MM": r"(?P<M>[0-9]{2})",
+    "SS": r"(?P<S>[0-9]{2})",
+    "AM": r"(?P<half>[AaPp]\.?[Mm]\.?)",
 }
-DATE_FORMATS: dict[str, re.Pattern[str]] = {
-    f"{day}{time}": re.compile(day_pattern + time_pattern)
-    for day, day_pattern in _DAY_PATTERNS.items()
-    for time, time_pattern in _TIME_PATTERNS.items()
-}
-DATE_FORMATS["YYYY-MM-DDTHH:MM:SS"] = re.compile(
-    _DAY_PATTERNS["YYYY-MM-DD"] + r"T(?P<H>[0-9]{2}):(?P<M>[0-9]{2}):[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
-)
+FORMAT_SEPARATORS = "-/., :"
+# A value may state its own offset from UTC; then the instant, not the text, is converted.
+_ZONE = r"(?:\s?(?P<zone>Z|z|[+-][0-9]{2}:?[0-9]{2}))?"
+_COMPILED_FORMATS: dict[str, re.Pattern[str] | None] = {}
+
+
+def _split_format(name: str) -> tuple[str, str, str]:
+    """The day part, what joins it to the time, and the time part."""
+    for index, character in enumerate(name):
+        if character in ("T", " ") and name[index + 1: index + 2] == "H":
+            return name[:index], character, name[index + 1:]
+    return name, "", ""
+
+
+def _format_pieces(part: str, tokens: dict[str, str]) -> list[tuple[str, str]] | None:
+    pieces: list[tuple[str, str]] = []
+    index = 0
+    while index < len(part):
+        for token in sorted(tokens, key=len, reverse=True):
+            if part.startswith(token, index):
+                pieces.append((token, tokens[token]))
+                index += len(token)
+                break
+        else:
+            if part[index] not in FORMAT_SEPARATORS:
+                return None
+            pieces.append(("", re.escape(part[index])))
+            index += 1
+    return pieces
+
+
+def compile_date_format(name: str) -> re.Pattern[str] | None:
+    """One pattern for a written format such as 'DD-MMM-YYYY HH:MM', or None if it is not one."""
+    if name in _COMPILED_FORMATS:
+        return _COMPILED_FORMATS[name]
+    compiled: re.Pattern[str] | None = None
+    day_part, joiner, time_part = _split_format(name)
+    day_pieces = _format_pieces(day_part, _DATE_TOKENS) if day_part else None
+    if day_pieces is not None:
+        kinds = [token for token, _ in day_pieces if token]
+        counts = [sum(1 for kind in kinds if kind.startswith(letter)) for letter in "YMD"]
+        if len(kinds) == 3 and counts == [1, 1, 1]:
+            pattern = "".join(piece for _, piece in day_pieces)
+            time_pieces = _format_pieces(time_part, _TIME_TOKENS) if time_part else []
+            names = [token for token, _ in (time_pieces or []) if token]
+            if time_part and (time_pieces is None or names[:2] not in (["HH", "MM"], ["H", "MM"])):
+                pattern = ""
+            elif time_part:
+                pattern += re.escape(joiner) + "".join(piece for _, piece in time_pieces)
+                if "SS" in names:
+                    pattern += r"(?:\.[0-9]+)?"
+            if pattern:
+                compiled = re.compile(pattern + _ZONE)
+    _COMPILED_FORMATS[name] = compiled
+    return compiled
+
+
+def numeric_order(name: str) -> str:
+    """Whether a numeric format writes the day or the month first; '' when it names the month."""
+    day_part, _joiner, _time = _split_format(name)
+    pieces = _format_pieces(day_part, _DATE_TOKENS)
+    kinds = [token for token, _ in pieces or [] if token]
+    # A named month reads one way, and a year-first shape leaves no position where a day
+    # and a month could trade places, so neither can be read two ways.
+    if any(kind.startswith("MMM") for kind in kinds) or (kinds and kinds[0].startswith("Y")):
+        return ""
+    for kind in kinds:
+        if kind.startswith("D"):
+            return "day-first"
+        if kind.startswith("M"):
+            return "month-first"
+    return ""
+
+
+# Shapes common enough to try when reading an export to draft a config. A config may
+# declare any shape these parts can build, not only the ones listed here.
+DATE_FORMATS: dict[str, re.Pattern[str]] = {}
+for _day in ("YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY", "DD-MM-YYYY", "MM-DD-YYYY", "YYYY/MM/DD",
+             "DD.MM.YYYY", "D MMM YYYY", "MMM D, YYYY", "DD-MMM-YYYY", "DD MMMM YYYY",
+             "DD/MM/YY", "MM/DD/YY", "DD-MMM-YY"):
+    for _time in ("", " HH:MM", " HH:MM:SS", "THH:MM:SS", " HH:MM AM", " HH:MM:SS AM"):
+        _pattern = compile_date_format(f"{_day}{_time}")
+        if _pattern is not None:
+            DATE_FORMATS[f"{_day}{_time}"] = _pattern
 GROUPED_DECIMAL = re.compile(r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?")
 # Excel in many locales writes 1.234,56 where others write 1,234.56.
 GROUPED_COMMA_DECIMAL = re.compile(r"[0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]+)?|[0-9]+(?:,[0-9]+)?")
@@ -291,6 +385,19 @@ PLAIN_COMMA_DECIMAL = re.compile(r"[0-9]+(?:,[0-9]+)?")
 # The grouping mark that belongs with each decimal mark.
 DECIMAL_MARKS = {"point": ",", "comma": "."}
 MAX_HEADER_ROW = 1000
+
+
+def _century(short_year: int) -> int:
+    return 1900 + short_year if short_year >= CENTURY_BREAK else 2000 + short_year
+
+
+def _half_of_day(hour: int, half: str) -> int:
+    """12-hour clock to 24-hour: 12am is 0, 12pm is 12."""
+    if not 1 <= hour <= 12:
+        raise ValueError("hour is not on a 12-hour clock")
+    if half[0] in "Pp":
+        return hour if hour == 12 else hour + 12
+    return 0 if hour == 12 else hour
 
 
 def _ref(source: str, source_file: str, source_row: int) -> str:
@@ -370,18 +477,31 @@ class FileSpec:
             return _parse_date(row.get(self.columns[field]), field)
         text = self.read_text(row, field)
         for name in self.date_formats:
-            match = DATE_FORMATS[name].fullmatch(text)
+            pattern = compile_date_format(name)
+            match = pattern.fullmatch(text) if pattern else None
             if match is None:
                 continue
+            found = match.groupdict()
             try:
-                moment = datetime(
-                    int(match["y"]), int(match["m"]), int(match["d"]),
-                    int(match.groupdict().get("H") or 0), int(match.groupdict().get("M") or 0),
-                )
-            except ValueError:
-                break
-            return (moment + timedelta(hours=self.time_shift_hours)).date() if self.time_shift_hours else moment.date()
+                year = int(found["y"]) if found.get("y") else _century(int(found["yy"]))
+                month = MONTH_NUMBERS[found["name"].lower()] if found.get("name") else int(found["m"])
+                hour = int(found.get("H") or 0)
+                if found.get("half"):
+                    hour = _half_of_day(hour, found["half"])
+                moment = datetime(year, month, int(found["d"]), hour, int(found.get("M") or 0))
+            except (ValueError, KeyError):
+                continue
+            return self._calendar_date(moment, found.get("zone"))
         raise ValueError(f"{field} does not match the declared format {self.date_format}")
+
+    def _calendar_date(self, moment: datetime, zone: str | None) -> date:
+        """The day this value belongs to, once its own offset and the declared shift are applied."""
+        if zone:
+            if zone not in ("Z", "z"):
+                digits = zone.replace(":", "")
+                minutes = int(digits[1:3]) * 60 + int(digits[3:5])
+                moment -= timedelta(minutes=-minutes if zone[0] == "-" else minutes)
+        return (moment + timedelta(hours=self.time_shift_hours)).date() if self.time_shift_hours else moment.date()
 
     def _decimal(self, text: str, field: str) -> Decimal:
         """One written amount, honouring the declared label, separator and sign."""
@@ -696,15 +816,22 @@ def load_engagement(config_path: str | Path) -> Engagement:
                 not isinstance(declared_dates, list)
                 or not 1 <= len(declared_dates) <= 4
                 or len(set(declared_dates)) != len(declared_dates)
-                or any(not isinstance(name, str) or name not in DATE_FORMATS for name in declared_dates)
+                or any(
+                    not isinstance(name, str) or len(name) > 40 or compile_date_format(name) is None
+                    for name in declared_dates
+                )
             ):
-                fail(f"{where}.date_format must be one of {', '.join(DATE_FORMATS)}, or a list of them")
-            if {"DD/MM/YYYY", "MM/DD/YYYY"} <= {name.split(" ")[0].split("T")[0] for name in declared_dates}:
-                fail(f"{where}.date_format cannot declare both DD/MM/YYYY and MM/DD/YYYY: 03/07/2026 would be two dates")
+                fail(f"{where}.date_format is written from YYYY, YY, MMMM, MMM, MM, M, DD and D with the "
+                     "separators - / . and space, and an optional time such as ' HH:MM', ' HH:MM:SS', "
+                     "'THH:MM:SS' or ' HH:MM AM'; a list declares several. Examples: "
+                     f"{', '.join(list(DATE_FORMATS)[:3])}")
+            if {"day-first", "month-first"} <= {numeric_order(name) for name in declared_dates}:
+                fail(f"{where}.date_format cannot declare both a day-first and a month-first numeric shape: "
+                     "03/07/2026 would be two dates")
             shift = entry.get("time_zone_shift_hours", 0)
             if type(shift) is not int or not -MAX_TIME_SHIFT_HOURS <= shift <= MAX_TIME_SHIFT_HOURS:
                 fail(f"{where}.time_zone_shift_hours must be whole hours between -{MAX_TIME_SHIFT_HOURS} and {MAX_TIME_SHIFT_HOURS}")
-            if shift and any("(?P<H>" not in DATE_FORMATS[name].pattern for name in declared_dates):
+            if shift and any("(?P<H>" not in compile_date_format(name).pattern for name in declared_dates):
                 fail(f"{where}.time_zone_shift_hours needs every declared date_format to include a time")
             amounts = entry.get("amounts", {})
             if not isinstance(amounts, dict) or set(amounts) - {

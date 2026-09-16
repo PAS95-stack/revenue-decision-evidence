@@ -24,8 +24,9 @@ or evidence of paid validation.
   from this evidence set alone.*
 - **Reads real exports through a declared engagement config.** Column names,
   separators and encodings (including semicolon-separated Windows-1252 files),
-  several date formats within one file, a total computed from quantity and unit
-  price, a currency named per row, European numbers such as `1.234,56`, a currency
+  dates in any common shape (month names, two-digit years, dot or dash separators,
+  12-hour times, `Z` and `+04:00` offsets) converted to one calendar date, several
+  date shapes within one file, a total computed from quantity and unit price, a currency named per row, European numbers such as `1.234,56`, a currency
   symbol beside the amount, a header below a report title, time-zone shifts, ad
   accounts in other currencies, refunds and credit notes, revenue that names
   customers rather than leads, and attribution windows are declared per
@@ -88,7 +89,15 @@ step checks its expected result and the script stops if one is wrong. Omit
 
 ## Real client exports
 
-Each engagement lives in its own folder outside this repository:
+Each engagement lives in its own folder outside this repository. One command does the
+whole journey — convert spreadsheets, record what arrived, draft the config from the
+exports, and run once nothing needs a decision:
+
+```bash
+python3 scripts/engagement.py ingest ~/engagements/client-2026-09 --received-on 2026-09-16 --received-from "Finance"
+```
+
+The same steps are available one at a time:
 
 ```bash
 python3 scripts/engagement.py init ~/engagements/client-2026-09 --name "Client, September review"

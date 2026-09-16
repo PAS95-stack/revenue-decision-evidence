@@ -883,5 +883,110 @@ class RealWorldFormatTests(FormatTestCase):
         rows = {ref(row): row for row in report.dispositions}
         self.assertEqual(rows["revenue/orders.csv:2"].amount_aed, "2500.00")
 
+
+class WrittenDateTests(FormatTestCase):
+    """Dates as systems write them, each converted to the one calendar date the report uses."""
+
+    def test_f31_month_names_and_two_digit_years_are_read_when_declared(self):
+        config = self.example()
+        invoices = config.parent / "xero_invoices.csv"
+        rows = list(csv.reader(io.StringIO(invoices.read_text(encoding="utf-8"))))
+        months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+        for row in rows[1:]:
+            day, month, year = row[2].split("/")
+            row[2] = f"{int(day):02d}-{months[int(month) - 1]}-{year[2:]}"
+        with invoices.open("w", encoding="utf-8", newline="") as handle:
+            csv.writer(handle).writerows(rows)
+        edit_json(config, lambda c: c["sources"]["revenue"][0].update(date_format="DD-MMM-YY"))
+        report = self.publish(config)
+        self.assertEqual(report.summary["accepted_revenue_aed"], "29400.00")
+        self.assertEqual(report.summary["attributed_revenue_aed"], "21250.00", "attribution windows still hold")
+
+    def test_f32_the_draft_reads_a_month_name_date_from_the_data(self):
+        from revenue_evidence.propose import write_proposal
+
+        folder = self.root / "inputs"
+        folder.mkdir()
+        write_csv(folder / "orders.csv", ["Order ID", "Reference", "Sales", "Order Date"],
+                  [["T1", "L1", "100.00", "Jul 5, 2026"], ["T2", "L1", "200.00", "Jul 20, 2026"]])
+        write_csv(folder / "contacts.csv", ["Record ID", "Create Date", "Lifecycle Stage", "UTM Campaign"],
+                  [["L1", "2026-07-01", "customer", "C-1"]])
+        write_csv(folder / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", "C-1", "Search", "100"]])
+        draft, _notes = write_proposal(folder, "Month names", "public")
+        revenue = json.loads(draft.read_text(encoding="utf-8"))["sources"]["revenue"][0]
+        self.assertEqual(revenue["date_format"], "MMM D, YYYY")
+        self.assertEqual(revenue["columns"]["value_aed"], "Sales")
+
+    def test_f33_an_offset_moves_a_value_to_its_day_and_ambiguous_pairs_stay_refused(self):
+        spec = engine.FileSpec("revenue", Path("x"), "x", {"date": "D"}, {},
+                               date_formats=("YYYY-MM-DDTHH:MM:SS",), fields=("date",))
+        self.assertEqual(spec.read_date({"D": "2026-07-05T23:30:00-03:00"}, "date"), date(2026, 7, 6))
+        self.assertEqual(spec.read_date({"D": "2026-07-05T23:30:00Z"}, "date"), date(2026, 7, 5))
+        self.assertEqual(spec.read_date({"D": "2026-07-05T01:30:00+04:00"}, "date"), date(2026, 7, 4))
+        config = self.example()
+        edit_json(config, lambda c: c["sources"]["revenue"][0].update(date_format=["DD-MM-YYYY", "MM-DD-YYYY"]))
+        with self.assertRaisesRegex(InputContractError, "day-first and a month-first"):
+            load_engagement(config)
+        edit_json(config, lambda c: c["sources"]["revenue"][0].update(date_format=["YYYY-MM-DD", "DD/MM/YYYY"]))
+        self.assertIsNotNone(load_engagement(config), "a year-first shape is never ambiguous")
+
+
+class OneCommandTests(FormatTestCase):
+    """The whole journey in one command, so an engagement needs no assembly by hand."""
+
+    def load_script(self):
+        spec = importlib.util.spec_from_file_location("engagement_script", ROOT / "scripts" / "engagement.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_f34_one_command_logs_drafts_and_runs(self):
+        script = self.load_script()
+        folder = self.root / "engagement"
+        arguments = ["ingest", str(folder), "--received-on", "2026-09-16",
+                     "--received-from", "Finance", "--origin", "synthetic"]
+        with contextlib.redirect_stdout(io.StringIO()) as first:
+            self.assertEqual(script.main(arguments, repository=ROOT), 0)
+        self.assertIn("Put the approved exports", first.getvalue())
+        self.assertFalse((folder / "inputs" / "engagement.json").exists(), "no template is left to trip the run")
+
+        inputs = folder / "inputs"
+        write_csv(inputs / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", "C-1", "Search", "1000.00"], ["2026-07-01", "C-2", "Display", "500.00"]])
+        write_csv(inputs / "contacts.csv", ["Record ID", "Create Date", "Lifecycle Stage", "UTM Campaign"],
+                  [["L-1", "2026-07-02", "customer", "C-1"]])
+        write_csv(inputs / "orders.csv", ["Order ID", "Reference", "Sales", "Order Date"],
+                  [["T-1", "L-1", "2500.00", "2026-07-10"]])
+        with contextlib.redirect_stdout(io.StringIO()) as second:
+            self.assertEqual(script.main(arguments + ["--accept-draft"], repository=ROOT), 0)
+        printed = second.getvalue()
+        self.assertIn("header matched", printed, "the draft says how each column was chosen")
+        report = json.loads((folder / "outputs" / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["summary"]["accepted_spend_aed"], "1500.00")
+        self.assertEqual(report["summary"]["accepted_revenue_aed"], "2500.00")
+        self.assertEqual(report["summary"]["attributed_revenue_aed"], "2500.00")
+        logged = (folder / "records" / "intake_log.csv").read_text(encoding="utf-8")
+        for name in ("ads.csv", "contacts.csv", "orders.csv"):
+            self.assertIn(name, logged, "every export is recorded at intake")
+
+    def test_f35_one_command_stops_when_the_draft_needs_a_person(self):
+        script = self.load_script()
+        folder = self.root / "engagement"
+        arguments = ["ingest", str(folder), "--received-on", "2026-09-16",
+                     "--received-from", "Finance", "--origin", "synthetic"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(script.main(arguments, repository=ROOT), 0)
+        inputs = folder / "inputs"
+        write_csv(inputs / "orders.csv", ["Invoice", "Reference", "Total", "Date", "Currency"],
+                  [["T1", "L1", "100.00", "2026-07-05", "USD"]])
+        write_csv(inputs / "contacts.csv", ["Record ID", "Create Date", "Lifecycle Stage", "UTM Campaign"],
+                  [["L1", "2026-07-01", "customer", "C-1"]])
+        write_csv(inputs / "spend.csv", ["Day", "Campaign ID", "Cost"], [["2026-07-01", "C-1", "100"]])
+        with contextlib.redirect_stdout(io.StringIO()) as printed, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(script.main(arguments + ["--accept-draft"], repository=ROOT), 2)
+        self.assertIn("need you before this can run", printed.getvalue())
+        self.assertFalse((folder / "outputs" / "report.json").exists(), "nothing publishes on an unsettled draft")
+
 if __name__ == "__main__":
     unittest.main()

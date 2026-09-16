@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Set up, log, run and close an engagement folder for real client exports.
 
+    python3 scripts/engagement.py ingest ~/engagements/acme-2026-09 --received-on 2026-09-16 --received-from "Finance manager"
+
+One command does the whole journey: it creates the folder if it is new, converts any
+spreadsheets, records what arrived, drafts the config from the exports, and runs when
+nothing is left for a person to decide. The steps below remain available on their own.
+
     python3 scripts/engagement.py init ~/engagements/acme-2026-09 --name "Acme clinics, September review"
     python3 scripts/engagement.py intake ~/engagements/acme-2026-09 --received-on 2026-09-16 --received-from "Finance manager"
     python3 scripts/engagement.py propose ~/engagements/acme-2026-09
@@ -26,9 +32,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from revenue_evidence import cli  # noqa: E402
 from revenue_evidence.engine import InputContractError, ensure_outside_repository, load_engagement  # noqa: E402
-from revenue_evidence.propose import write_proposal  # noqa: E402
+from revenue_evidence.propose import unresolved, write_proposal  # noqa: E402
+from xlsx_to_csv import WorkbookError, convert  # noqa: E402
 
 CONFIG_NAME = "engagement.json"
 INTAKE_FIELDS = ["file", "sha256", "bytes", "received_on", "received_from"]
@@ -144,6 +153,69 @@ def propose(folder: Path, name: str | None, data_origin: str) -> int:
     return 0
 
 
+def _convert_spreadsheets(inputs: Path) -> list[str]:
+    """Turn every .xlsx beside the exports into a CSV the run can read, once."""
+    done = []
+    for workbook in sorted(inputs.glob("*.xlsx")):
+        target = workbook.with_suffix(".csv")
+        if target.exists():
+            continue
+        try:
+            manifest = convert(workbook, target)
+        except WorkbookError as exc:
+            done.append(f"  {workbook.name}: {exc}")
+            continue
+        record = target.with_suffix(".csv.conversion.json")
+        record.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        done.append(f"  {workbook.name} -> {target.name} ({manifest['rows_written']} rows, sheet "
+                    f"'{manifest['sheet']}')")
+    return done
+
+
+def ingest(folder: Path, received_on: str, received_from: str, name: str | None, data_origin: str,
+           accept_draft: bool, as_of: str | None, repository: Path) -> int:
+    """Convert, log, draft and run: the whole journey in one command."""
+    inputs = folder / "inputs"
+    if not inputs.is_dir():
+        started = init(folder, name or folder.name, repository)
+        if started:
+            return started
+        (inputs / CONFIG_NAME).unlink(missing_ok=True)
+        print(f"Put the approved exports in {inputs} and run ingest again.")
+        return 0
+    converted = _convert_spreadsheets(inputs)
+    if converted:
+        print("Converted spreadsheets:")
+        print("\n".join(converted))
+    logged = intake(folder, received_on, received_from)
+    if logged:
+        return logged
+    config = inputs / CONFIG_NAME
+    if not config.exists():
+        try:
+            draft, notes = write_proposal(inputs, name or folder.name, data_origin)
+        except FileNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        report = notes.read_text(encoding="utf-8")
+        print(report)
+        outstanding = unresolved(report)
+        if outstanding:
+            print(f"\n{len(outstanding)} choice(s) need you before this can run:")
+            for line in outstanding:
+                print(f"  {line}")
+            print(f"\nSettle those in {draft.name}, rename it to {CONFIG_NAME}, then run:"
+                  f"\n  python3 scripts/engagement.py run {folder}", file=sys.stderr if accept_draft else sys.stdout)
+            return 2 if accept_draft else 0
+        if not accept_draft:
+            print(f"\nNothing in this draft needs a decision. Check it, rename {draft.name} to {CONFIG_NAME} and run, "
+                  f"or repeat this command with --accept-draft to use it now.")
+            return 0
+        draft.replace(config)
+        print(f"Nothing in the draft needed a decision, so it became {CONFIG_NAME}.")
+    return run(folder, as_of, repository)
+
+
 def intake(folder: Path, received_on: str, received_from: str) -> int:
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", received_on):
         print("--received-on must be YYYY-MM-DD", file=sys.stderr)
@@ -212,6 +284,15 @@ def deletion_check(folder: Path) -> int:
 def main(argv: list[str] | None = None, repository: Path = ROOT) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
+    whole = commands.add_parser("ingest", help="convert, log, draft and run in one command")
+    whole.add_argument("folder", type=Path)
+    whole.add_argument("--received-on", required=True)
+    whole.add_argument("--received-from", required=True)
+    whole.add_argument("--name", help="engagement name; taken from an existing config, or the folder name")
+    whole.add_argument("--origin", default="client", choices=("client", "public", "synthetic"))
+    whole.add_argument("--accept-draft", action="store_true",
+                       help="run the drafted config when nothing in it needs a decision")
+    whole.add_argument("--as-of")
     start = commands.add_parser("init", help="create an engagement folder outside the repository")
     start.add_argument("folder", type=Path)
     start.add_argument("--name", required=True, help="engagement name shown in the brief")
@@ -231,6 +312,9 @@ def main(argv: list[str] | None = None, repository: Path = ROOT) -> int:
     args = parser.parse_args(argv)
     folder = args.folder.expanduser()
     try:
+        if args.command == "ingest":
+            return ingest(folder, args.received_on, args.received_from, args.name, args.origin,
+                          args.accept_draft, args.as_of, repository)
         if args.command == "init":
             return init(folder, args.name, repository)
         if args.command == "propose":
