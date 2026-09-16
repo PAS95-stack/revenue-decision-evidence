@@ -9,7 +9,10 @@
   from the raw exports; outputs are published only when the two agree.
 - A narrative gate that rejects any number not equal to the evidence it cites.
 - Real-shaped exports read through a declared engagement config, rehearsed on
-  25,900 public invoices with a synthetic CRM and advertising overlay.
+  25,900 public invoices with a synthetic CRM and advertising overlay, and on the
+  public Olist marketing funnel: 8,000 real leads carrying a channel origin, 842
+  closed deals and 112,650 real order lines joined through customers, with the
+  advertising spend a declared overlay because that dataset publishes none.
 
 Verified with 138 tests on Python 3.13. CI runs the same suite on Python
 3.11–3.13 for every push.
@@ -35,17 +38,22 @@ Verified with 138 tests on Python 3.13. CI runs the same suite on Python
 - Spend and revenue periods are not aligned: channel ROAS divides all attributed
   revenue in the files by all accepted spend.
 - An engagement config maps columns and declares formats. One file may declare
-  several date formats, compute an amount from two columns, and convert a
-  currency named per row at a declared rate. It cannot invent a rate, read an
-  undeclared format, or choose between two readings of an ambiguous date: each is
-  refused or left for a person to settle.
+  several date formats, compute an amount from two columns, convert a currency
+  named per row at a declared rate, read European numbers such as `1.234,56`,
+  carry a currency symbol beside the amount, and start its header below a report
+  title. It cannot invent a rate, read an undeclared format, or choose between two
+  readings of an ambiguous date: each is refused or left for a person to settle.
 - Line-item exports are summed per invoice when `line_id` is declared. Lines of
   one invoice that disagree about the customer or date are all held back.
 - Invoice status is read only when an `include_when` filter declares which values
   to keep; otherwise every row in the export counts, including unpaid invoices.
-- Time of day and time zones are ignored; dates are taken as written.
-- Separator and encoding are declared, not detected: `comma`, `semicolon` or
-  `tab`, and UTF-8, UTF-16, Windows-1252 or Latin-1.
+- Time of day is ignored and a date is taken as written, unless the file declares
+  `time_zone_shift_hours`, which moves a timestamp into the day it belongs to.
+- A run reads only what the config declares; it detects nothing. Separators are
+  `comma`, `semicolon` or `tab`, and encodings UTF-8, UTF-16, Windows-1252 or
+  Latin-1. `propose` reads the exports beforehand and drafts those declarations
+  from the data, but a person checks the draft and the run still refuses anything
+  that does not match it.
 - Spreadsheets are converted to CSV by `scripts/xlsx_to_csv.py` before a run. The
   conversion records the workbook's SHA-256 and keeps row numbers aligned with the
   sheet, but it is a step outside the checked path, and it reads a cell as a date

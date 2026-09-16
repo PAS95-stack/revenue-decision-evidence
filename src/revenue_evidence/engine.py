@@ -257,7 +257,7 @@ CONFIG_KEYS = frozenset(
 FILE_KEYS = frozenset(
     {
         "file", "columns", "fixed", "date_format", "amounts", "uppercase", "include_when", "delimiter", "encoding",
-        "time_zone_shift_hours",
+        "time_zone_shift_hours", "header_row",
     }
 )
 MAX_FILES_PER_SOURCE = 20
@@ -285,6 +285,12 @@ DATE_FORMATS["YYYY-MM-DDTHH:MM:SS"] = re.compile(
     _DAY_PATTERNS["YYYY-MM-DD"] + r"T(?P<H>[0-9]{2}):(?P<M>[0-9]{2}):[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
 )
 GROUPED_DECIMAL = re.compile(r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?")
+# Excel in many locales writes 1.234,56 where others write 1,234.56.
+GROUPED_COMMA_DECIMAL = re.compile(r"[0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]+)?|[0-9]+(?:,[0-9]+)?")
+PLAIN_COMMA_DECIMAL = re.compile(r"[0-9]+(?:,[0-9]+)?")
+# The grouping mark that belongs with each decimal mark.
+DECIMAL_MARKS = {"point": ",", "comma": "."}
+MAX_HEADER_ROW = 1000
 
 
 def _ref(source: str, source_file: str, source_row: int) -> str:
@@ -307,12 +313,16 @@ class FileSpec:
     fixed: dict[str, str]
     date_formats: tuple[str, ...] = ("YYYY-MM-DD",)
     thousands_separator: str = ""
+    # "point" reads 1,234.56; "comma" reads 1.234,56.
+    decimal: str = "point"
     currency_label: str = ""
     uppercase: frozenset[str] = frozenset()
     # Fields this file must supply; empty means the three-file contract's fields.
     fields: tuple[str, ...] = ()
     delimiter: str = "comma"
     encoding: str = "utf-8"
+    # The physical line the header sits on; ad platforms print a title above it.
+    header_row: int = 1
     filter_column: str = ""
     filter_values: tuple[str, ...] = ()
     # Amounts are written in this currency and converted at the declared rate.
@@ -385,7 +395,13 @@ class FileSpec:
             text, negative = text[1:-1].strip(), True
         elif text.startswith("-"):
             text, negative = text[1:].lstrip(), True
-        if self.thousands_separator:
+        if self.decimal == "comma":
+            pattern = GROUPED_COMMA_DECIMAL if self.thousands_separator else PLAIN_COMMA_DECIMAL
+            if not pattern.fullmatch(text):
+                raise ValueError(f"{field} is not written in the declared format")
+            text = text.replace(self.thousands_separator, "") if self.thousands_separator else text
+            text = text.replace(",", ".")
+        elif self.thousands_separator:
             if not GROUPED_DECIMAL.fullmatch(text):
                 raise ValueError(f"{field} is not written in the declared format")
             text = text.replace(self.thousands_separator, "")
@@ -433,6 +449,8 @@ class FileSpec:
         parts = [
             f"thousands separator '{self.thousands_separator}'" if self.thousands_separator else "no thousands separator"
         ]
+        if self.decimal != "point":
+            parts.append("decimal comma")
         if self.currency_label:
             parts.append(f"currency label {self.currency_label}")
         if self.value_from:
@@ -509,6 +527,8 @@ class Engagement:
                     "encoding": spec.encoding,
                     "thousands_separator": spec.thousands_separator,
                     "currency_label": spec.currency_label,
+                    "decimal": spec.decimal,
+                    "header_row": spec.header_row,
                     "currency": spec.currency,
                     "aed_per_unit": spec.aed_per_unit,
                     "rate_source": spec.rate_source,
@@ -666,6 +686,10 @@ def load_engagement(config_path: str | Path) -> Engagement:
             encoding = entry.get("encoding", "utf-8")
             if encoding not in ENCODINGS:
                 fail(f"{where}.encoding must be one of {', '.join(ENCODINGS)}")
+            header_row = entry.get("header_row", 1)
+            if not isinstance(header_row, int) or isinstance(header_row, bool) or not 1 <= header_row <= MAX_HEADER_ROW:
+                fail(f"{where}.header_row must be a whole number from 1 to {MAX_HEADER_ROW}: the line the column "
+                     "names sit on, when the export prints a title above them")
             declared_dates = entry.get("date_format", "YYYY-MM-DD")
             declared_dates = [declared_dates] if isinstance(declared_dates, str) else declared_dates
             if (
@@ -684,14 +708,19 @@ def load_engagement(config_path: str | Path) -> Engagement:
                 fail(f"{where}.time_zone_shift_hours needs every declared date_format to include a time")
             amounts = entry.get("amounts", {})
             if not isinstance(amounts, dict) or set(amounts) - {
-                "thousands_separator", "currency_label", "currency", "refunds", "value_from"
+                "thousands_separator", "decimal", "currency_label", "currency", "refunds", "value_from"
             }:
-                fail(f"{where}.amounts may declare only thousands_separator, currency_label, currency, refunds and value_from")
+                fail(f"{where}.amounts may declare only thousands_separator, decimal, currency_label, currency, "
+                     "refunds and value_from")
             if amounts and not AMOUNT_FIELDS[source]:
                 fail(f"{where}.amounts is not allowed: the {source} export has no amounts")
+            decimal_mark = amounts.get("decimal", "point")
+            if decimal_mark not in DECIMAL_MARKS:
+                fail(f'{where}.amounts.decimal must be "point" for 1,234.56 or "comma" for 1.234,56')
             separator = amounts.get("thousands_separator", "")
-            if separator not in ("", ","):
-                fail(f"{where}.amounts.thousands_separator must be ','")
+            if separator not in ("", DECIMAL_MARKS[decimal_mark]):
+                fail(f"{where}.amounts.thousands_separator must be '{DECIMAL_MARKS[decimal_mark]}' "
+                     f'with decimal "{decimal_mark}"')
             declared_value = amounts.get("value_from")
             parsed_value_from = None
             if declared_value is not None:
@@ -755,8 +784,14 @@ def load_engagement(config_path: str | Path) -> Engagement:
             currency_label = amounts.get("currency_label", "")
             if currency_column and currency_label:
                 fail(f"{where}.amounts.currency_label cannot be used with a currency column")
-            if currency_label not in ("", code):
-                fail(f"{where}.amounts.currency_label must be {code}, the declared currency")
+            if currency_label and (
+                not is_text(currency_label)
+                or len(currency_label) > 8
+                or any(character.isdigit() for character in currency_label)
+                or any(mark in currency_label for mark in "[]")
+            ):
+                fail(f'{where}.amounts.currency_label must be the text written beside the number, such as "AED", '
+                     '"$" or "R$": up to 8 characters and no digits')
             refunds = amounts.get("refunds", "reject")
             if refunds not in REFUND_MODES or (refunds != "reject" and source != "revenue"):
                 fail(f"{where}.amounts.refunds must be one of {', '.join(REFUND_MODES)}; only revenue exports hold refunds")
@@ -788,6 +823,7 @@ def load_engagement(config_path: str | Path) -> Engagement:
                 FileSpec(
                     source=source, path=file_path, label=label, columns=dict(columns), fixed=dict(fixed),
                     date_formats=tuple(declared_dates), thousands_separator=separator, currency_label=currency_label,
+                    decimal=decimal_mark, header_row=header_row,
                     uppercase=frozenset(uppercase), fields=tuple(fields), delimiter=delimiter, encoding=encoding,
                     filter_column=filter_column, filter_values=filter_values, currency=code, aed_per_unit=rate,
                     rate_source=rate_source, refunds=refunds, value_from=parsed_value_from,
@@ -843,6 +879,9 @@ def _read_csv(spec: FileSpec) -> list[tuple[int, dict[str, Any]]]:
             for record in reader:
                 start_line = previous_line + 1
                 previous_line = reader.line_num
+                # An export may print a report title and a date range above its header row.
+                if start_line < spec.header_row:
+                    continue
                 if not record:
                     continue
                 if fieldnames is None:
@@ -1828,20 +1867,24 @@ def diagnose(engagement: Engagement, report: EvidenceReport, sample: int = 500) 
 
             current = parses(spec)
             best_spec, best_count = spec, current
-            for separator in ("", ","):
-                for currency_label in ("", spec.currency):
-                    for refunds in (spec.refunds, "negative_values") if source == "revenue" else (spec.refunds,):
-                        candidate = replace(
-                            spec, thousands_separator=separator, currency_label=currency_label, refunds=refunds
-                        )
-                        count = parses(candidate)
-                        if count > best_count:
-                            best_spec, best_count = candidate, count
+            for decimal_mark in DECIMAL_MARKS:
+                for separator in ("", DECIMAL_MARKS[decimal_mark]):
+                    for currency_label in ("", spec.currency):
+                        for refunds in (spec.refunds, "negative_values") if source == "revenue" else (spec.refunds,):
+                            candidate = replace(
+                                spec, thousands_separator=separator, currency_label=currency_label,
+                                decimal=decimal_mark, refunds=refunds,
+                            )
+                            count = parses(candidate)
+                            if count > best_count:
+                                best_spec, best_count = candidate, count
             if best_count > current:
                 declared = [
                     f"thousands_separator \"{best_spec.thousands_separator}\"",
                     f"currency_label \"{best_spec.currency_label}\"",
                 ]
+                if best_spec.decimal != spec.decimal:
+                    declared.append(f"decimal \"{best_spec.decimal}\"")
                 if best_spec.refunds != spec.refunds:
                     declared.append(f"refunds \"{best_spec.refunds}\"")
                 hints.append(
@@ -2081,6 +2124,8 @@ def _interpretations(report: EvidenceReport) -> str:
         if item["delimiter"] != "comma" or item["encoding"] != "utf-8":
             parts.append(f"{item['delimiter']}-separated {item['encoding']} text")
         parts.append("dates written " + " or ".join(item["date_formats"]))
+        if item.get("header_row", 1) > 1:
+            parts.append(f"column names read from line {item['header_row']}")
         if item["time_zone_shift_hours"]:
             parts.append(f"times shifted {item['time_zone_shift_hours']:+d} hours before the date is taken")
         if item["source"] != "crm":
@@ -2089,6 +2134,8 @@ def _interpretations(report: EvidenceReport) -> str:
             ]
             if item["currency_label"]:
                 amount.append(f"currency label {item['currency_label']}")
+            if item.get("decimal", "point") != "point":
+                amount.append("decimal comma")
             if item["value_from"]:
                 amount.append(
                     f"value {item['value_from']['operation']} of " + " and ".join(item["value_from"]["columns"])

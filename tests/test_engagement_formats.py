@@ -798,5 +798,90 @@ class ReportSizeTests(FormatTestCase):
         self.assertTrue(any("omits row dispositions" in failure for failure in evaluation["failures"]), evaluation["failures"])
 
 
+
+class RealWorldFormatTests(FormatTestCase):
+    """Shapes real exports arrive in: a report title above the header, European numbers."""
+
+    def test_f27_a_report_title_above_the_header_is_declared_not_deleted(self):
+        config = self.example()
+        ads = config.parent / "google_ads.csv"
+        ads.write_text(
+            'Campaign report\n"Jul 1, 2026 - Jul 31, 2026"\n'
+            + ads.read_text(encoding="utf-8")
+            + "Total: account,,,3600.00\n",
+            encoding="utf-8",
+        )
+        edit_json(config, lambda c: c["sources"]["ads"][1].update(header_row=3))
+        report = self.publish(config)
+        self.assertEqual(report.summary["accepted_spend_aed"], "13550.50", "the rows below the title still count")
+        refused = [row for row in report.dispositions
+                   if row.source_file == "google_ads.csv" and row.status == "rejected"]
+        self.assertTrue(any("date" in row.reason for row in refused), "the totals row is refused, not counted")
+        edit_json(config, lambda c: c["sources"]["ads"][1].update(header_row=1))
+        with self.assertRaisesRegex(InputContractError, "is missing"):
+            EvidenceEngine().run_engagement(load_engagement(config))
+
+    def test_f28_european_amounts_and_a_currency_symbol_are_read_when_declared(self):
+        config = self.example()
+        invoices = config.parent / "xero_invoices.csv"
+        rows = list(csv.reader(io.StringIO(invoices.read_text(encoding="utf-8"))))
+        for row in rows[1:]:
+            whole, _point, fraction = row[3].replace(",", "").partition(".")
+            row[3] = "R$ " + f"{int(whole):,}".replace(",", ".") + "," + (fraction or "00")
+        with invoices.open("w", encoding="utf-8", newline="") as handle:
+            csv.writer(handle).writerows(rows)
+        edit_json(config, lambda c: c["sources"]["revenue"][0]["amounts"].update(
+            decimal="comma", thousands_separator=".", currency_label="R$"))
+        report = self.publish(config)
+        self.assertEqual(report.summary["accepted_revenue_aed"], "29400.00")
+        self.assertEqual(report.summary["refunded_revenue_aed"], "-500.00", "a refund survives the European format")
+        self.assertIn("decimal comma", (self.root / "out" / "executive_brief.md").read_text(encoding="utf-8"))
+
+    def test_f29_the_draft_detects_a_title_row_a_semicolon_file_and_a_currency_symbol(self):
+        from revenue_evidence.propose import write_proposal
+
+        folder = self.root / "inputs"
+        folder.mkdir()
+        (folder / "ads_report.csv").write_text(
+            'Campaign report\n"Jul 2026"\nDay,Campaign ID,Campaign type,Cost\n2026-07-01,C-1,Search,100.00\n',
+            encoding="utf-8")
+        (folder / "orders.csv").write_text(
+            "order_id;seller_id;price;order_purchase_timestamp\n"
+            "INV-1;S-1;R$ 1.234,56;2026-07-05 10:00:00\n"
+            "INV-2;S-1;R$ 2.000,00;2026-07-06 11:00:00\n", encoding="utf-8")
+        write_csv(folder / "contacts.csv", ["mql_id", "origin", "first_contact_date", "status", "seller_id"],
+                  [["L-1", "C-1", "2026-07-01", "won", "S-1"]])
+        draft, _notes = write_proposal(folder, "Detection", "public")
+        files = {entry["file"]: entry
+                 for entries in json.loads(draft.read_text(encoding="utf-8"))["sources"].values() for entry in entries}
+        self.assertEqual(files["ads_report.csv"]["header_row"], 3, "the header is below the report title")
+        self.assertEqual(files["orders.csv"]["delimiter"], "semicolon")
+        self.assertEqual(files["orders.csv"]["amounts"]["decimal"], "comma")
+        self.assertEqual(files["orders.csv"]["amounts"]["thousands_separator"], ".")
+        self.assertEqual(files["orders.csv"]["amounts"]["currency_label"], "R$")
+        self.assertEqual(files["contacts.csv"]["columns"]["lead_id"], "mql_id", "snake_case headers are read")
+        self.assertEqual(files["orders.csv"]["columns"]["date"], "order_purchase_timestamp")
+
+    def test_f30_a_computed_total_declares_the_format_of_its_parts(self):
+        from revenue_evidence.propose import write_proposal
+
+        folder = self.root / "inputs"
+        folder.mkdir()
+        write_csv(folder / "orders.csv", ["Invoice", "Reference", "Quantity", "Unit price", "Date"],
+                  [["T1", "L1", "1,000", "2.50", "2026-07-05"], ["T2", "L1", "2,000", "1.25", "2026-07-06"]])
+        write_csv(folder / "contacts.csv", ["Record ID", "Create Date", "Lifecycle Stage", "UTM Campaign"],
+                  [["L1", "2026-07-01", "customer", "C-1"]])
+        write_csv(folder / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", "C-1", "Search", "100"]])
+        draft, _notes = write_proposal(folder, "Computed", "public")
+        proposal = json.loads(draft.read_text(encoding="utf-8"))
+        revenue = proposal["sources"]["revenue"][0]
+        self.assertEqual(revenue["amounts"]["value_from"], {"multiply": ["Quantity", "Unit price"]})
+        self.assertEqual(revenue["amounts"]["thousands_separator"], ",", "the parts carry a separator")
+        (folder / "engagement.json").write_text(json.dumps(proposal), encoding="utf-8")
+        report = EvidenceEngine().run_engagement(load_engagement(folder / "engagement.json"))
+        rows = {ref(row): row for row in report.dispositions}
+        self.assertEqual(rows["revenue/orders.csv:2"].amount_aed, "2500.00")
+
 if __name__ == "__main__":
     unittest.main()

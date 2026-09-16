@@ -2,7 +2,7 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 144 tests, all passing on Python 3.13 on 16 September 2026, in about
+**Result:** 148 tests, all passing on Python 3.13 on 16 September 2026, in about
 three seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
@@ -168,3 +168,7 @@ minimum.
 | f24 | A declared time-zone shift moves a timestamp into the day it belongs to, and is refused unless the format carries a time |
 | f25 | A config drafted from the exports runs end to end and reproduces the worked example's figures |
 | f26 | The draft marks what only a person can decide: an exchange rate, a computed total, a channel with no column, an ambiguous date |
+| f27 | A report title above the header is declared with `header_row`, not deleted from the export; the totals row below the data is refused rather than counted |
+| f28 | European amounts (`1.234,56`) and a currency symbol beside the number are read when declared, refunds included |
+| f29 | The draft detects a title row, a semicolon file, a European amount with its symbol, and snake_case column names |
+| f30 | A computed total declares the number format of its parts, and the drafted config runs |

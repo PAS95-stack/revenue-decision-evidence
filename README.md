@@ -25,9 +25,11 @@ or evidence of paid validation.
 - **Reads real exports through a declared engagement config.** Column names,
   separators and encodings (including semicolon-separated Windows-1252 files),
   several date formats within one file, a total computed from quantity and unit
-  price, a currency named per row, time-zone shifts, ad accounts in other
-  currencies, refunds and credit notes, revenue that names customers rather than
-  leads, and attribution windows are declared per engagement, never guessed.
+  price, a currency named per row, European numbers such as `1.234,56`, a currency
+  symbol beside the amount, a header below a report title, time-zone shifts, ad
+  accounts in other currencies, refunds and credit notes, revenue that names
+  customers rather than leads, and attribution windows are declared per
+  engagement, never guessed.
   `propose` drafts the config from the exports themselves and marks what only a
   person can decide. See [`docs/engagements.md`](docs/engagements.md).
 - **Publishes only what an independent check reproduces.**

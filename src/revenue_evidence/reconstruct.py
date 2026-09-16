@@ -39,6 +39,8 @@ from pathlib import Path
 
 CENT = Decimal("0.01")
 PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+# 1.234,56 as Excel writes it in many locales, beside 1,234.56.
+DECIMAL_MARKS = {"point": ",", "comma": "."}
 ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 DOWNSTREAM_CHECKS = ("claim_values", "claim_lineage", "summary", "channels_and_sensitivity", "exceptions", "executive_brief")
 CITATION = re.compile(r"\[(EV-[A-Z]+-\d{3})\]")
@@ -233,7 +235,14 @@ def _one_decimal(text: str, spec: dict) -> Decimal | None:
         text, negative = text[1:].lstrip(), True
     if negative and spec["refunds"] != "negative_values":
         return None
-    if spec["thousands_separator"]:
+    if spec["decimal"] == "comma":
+        whole, point, fraction = text.partition(",")
+        groups = whole.split(".")
+        if len(groups) > 1:
+            if not spec["thousands_separator"] or not 1 <= len(groups[0]) <= 3 or any(len(g) != 3 for g in groups[1:]):
+                return None
+        text = "".join(groups) + ("." if point else "") + fraction
+    elif spec["thousands_separator"]:
         whole, point, fraction = text.partition(".")
         groups = whole.split(",")
         if len(groups) > 1 and (not 1 <= len(groups[0]) <= 3 or any(len(group) != 3 for group in groups[1:])):
@@ -274,7 +283,8 @@ def _plain_spec(name: str, path) -> dict:
     return {
         "path": Path(path), "label": "", "columns": {field: field for field in REQUIRED[name]}, "fixed": {},
         "date_formats": ("YYYY-MM-DD",), "time_shift": 0, "value_from": None, "currency_column": "",
-        "currency_rates": {}, "thousands_separator": "", "currency_label": "", "currency": "AED",
+        "currency_rates": {}, "thousands_separator": "", "decimal": "point", "header_row": 1,
+        "currency_label": "", "currency": "AED",
         "aed_per_unit": "1", "rate_source": "", "refunds": "reject", "uppercase": set(), "required": REQUIRED[name],
         "filter_column": "", "filter_values": (), "delimiter": "comma", "encoding": "utf-8",
     }
@@ -406,6 +416,7 @@ def _load_config(path) -> dict:
                 "date_formats": tuple(date_formats), "time_shift": shift, "value_from": parsed_value,
                 "currency_column": currency_column, "currency_rates": {k: v for k, v in currency_rates.items()}, "thousands_separator": amounts.get("thousands_separator", ""),
                 "currency_label": amounts.get("currency_label", ""), "currency": code, "aed_per_unit": rate,
+                "decimal": amounts.get("decimal", "point"), "header_row": entry.get("header_row", 1),
                 "rate_source": currency.get("rate_source", ""), "refunds": refunds, "uppercase": set(uppercase),
                 "required": required[name],
                 "delimiter": delimiter, "encoding": encoding,
@@ -422,6 +433,7 @@ def _load_config(path) -> dict:
                     "delimiter": delimiter, "encoding": encoding,
                     "thousands_separator": spec["thousands_separator"],
                     "currency_label": spec["currency_label"], "currency": code, "aed_per_unit": rate,
+                    "decimal": spec["decimal"], "header_row": spec["header_row"],
                     "rate_source": spec["rate_source"], "refunds": refunds, "uppercase": sorted(set(uppercase)),
                     "include_when": {"column": chosen["column"], "values": sorted({v.casefold() for v in chosen["values"]})} if chosen else None,
                 }
@@ -508,11 +520,25 @@ def _read_rows(spec: dict) -> list[tuple[int, dict]]:
             else f"{name} is not {spec['encoding']} text as declared"
         ) from exc
     try:
-        reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=DELIMITERS[spec["delimiter"]])
-        fieldnames = list(reader.fieldnames or [])
-        rows = [dict(row) for row in reader]
+        records = [r for r in csv.reader(io.StringIO(text, newline=""), delimiter=DELIMITERS[spec["delimiter"]]) if r]
     except csv.Error as exc:
         raise ReconstructionError(f"{name} is not a readable CSV ({exc})") from exc
+    record_starts = _record_start_lines(text, DELIMITERS[spec["delimiter"]])
+    if len(record_starts) != len(records):
+        raise ReconstructionError(f"cannot align the records of {name} to physical lines")
+    # An export may print a title above its header row; the lines above it are not records.
+    kept = [pair for pair in zip(record_starts, records) if pair[0] >= spec["header_row"]]
+    if not kept:
+        raise ReconstructionError(f"{name} has no header row at line {spec['header_row']}")
+    fieldnames = list(kept[0][1])
+    rows = []
+    for _start, record in kept[1:]:
+        row: dict = dict(zip(fieldnames, record))
+        if len(record) > len(fieldnames):
+            row[None] = record[len(fieldnames):]
+        for absent in fieldnames[len(record):]:
+            row[absent] = None
+        rows.append(row)
     headers = [spec["columns"][field] for field in spec["required"] if field in spec["columns"]]
     headers += [header for header in (
         spec["filter_column"], spec["currency_column"], *(spec["value_from"]["columns"] if spec["value_from"] else ())
@@ -523,10 +549,7 @@ def _read_rows(spec: dict) -> list[tuple[int, dict]]:
     repeated = sorted({header for header in headers if fieldnames.count(header) > 1})
     if repeated:
         raise ReconstructionError(f"{name} has more than one column named {', '.join(repeated)}")
-    starts = _record_start_lines(text, DELIMITERS[spec["delimiter"]])
-    if len(starts) != len(rows) + 1:
-        raise ReconstructionError(f"cannot align the records of {name} to physical lines")
-    return list(zip(starts[1:], rows))
+    return [(start, row) for (start, _record), row in zip(kept[1:], rows)]
 
 
 def _read_csv_output(path: Path) -> list[dict]:

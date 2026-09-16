@@ -106,10 +106,12 @@ Google Ads, HubSpot and Xero-shaped files.
 | `fixed` | no | A value for a whole file: `channel` for an ad export with no channel column, or `status` for a CRM export |
 | `delimiter` | no | `comma` (default), `semicolon` (Excel in many locales) or `tab` |
 | `encoding` | no | `utf-8` (default, byte-order mark allowed), `utf-16`, `windows-1252` or `latin-1` |
+| `header_row` | no | The line the column names sit on, 1 by default. Advertising platforms print a report title and a date range above them; declare `3` rather than editing the export. Row references stay the lines of the file as delivered |
 | `date_format` | no | One of `YYYY-MM-DD` (default), `DD/MM/YYYY`, `MM/DD/YYYY`, each optionally followed by ` HH:MM` or ` HH:MM:SS`, or `YYYY-MM-DDTHH:MM:SS`. A list declares several for one file, tried in order: `["YYYY-MM-DD", "DD/MM/YYYY"]`. Two formats that would read one value as two different dates are refused, so an ambiguous export must be settled by a person |
 | `time_zone_shift_hours` | no | Whole hours from −14 to 14 added before the day is taken, for an export written in another time zone. Every declared `date_format` must carry a time |
-| `amounts.thousands_separator` | no | `","` or `""` |
-| `amounts.currency_label` | no | Text that may precede or follow the number, such as `AED` or `USD`; must equal the currency |
+| `amounts.thousands_separator` | no | `","` or `""` with a decimal point; `"."` or `""` with a decimal comma |
+| `amounts.decimal` | no | `point` (default) reads `1,234.56`; `comma` reads `1.234,56`, as Excel writes it in many locales |
+| `amounts.currency_label` | no | Text written beside the number, before or after it: `AED`, `USD`, `$` or `R$`. Up to 8 characters and no digits |
 | `amounts.currency` | no | `{"code": "USD", "aed_per_unit": "3.6725", "rate_source": "UAE dirham peg to the US dollar"}`. One fixed rate per file, rounded half-up to fils after conversion |
 | `amounts.currency` (per row) | no | When each row names its own currency: `{"column": "Currency", "rates": {"USD": "3.6725", "AED": "1"}, "rate_source": "where the rates come from"}`. A code with no declared rate is rejected and named, never converted at a guess |
 | `amounts.value_from` | no | Compute the amount where the export carries no total: `{"multiply": ["Quantity", "Unit price"]}` or `{"add": ["Net", "Tax"]}`. The computed field then takes no column of its own |

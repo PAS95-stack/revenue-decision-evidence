@@ -26,28 +26,35 @@ from .engine import (
     CANONICAL_FIELDS,
     CUSTOMER_JOIN_FIELDS,
     DATE_FORMATS,
+    DECIMAL_MARKS,
     DELIMITERS,
     ENCODINGS,
     FileSpec,
 )
 
+# Characters that belong to a written number, so anything else beside it is a label.
+NUMBER_CHARACTERS = "0123456789.,-() "
+MAX_PREAMBLE_ROWS = 6
+
 SAMPLE_ROWS = 1000
 SLASH_DATE = re.compile(r"([0-9]{1,2})/([0-9]{1,2})/[0-9]{4}")
 # Header words that name each field in the exports these systems produce.
 FIELD_WORDS: dict[str, tuple[str, ...]] = {
-    "date": ("reporting starts", "day", "date", "week", "month"),
-    "campaign_id": ("campaign id", "utm campaign", "campaign name", "campaign", "utm_campaign", "source campaign"),
+    "date": ("reporting starts", "day", "date", "week", "month", "timestamp"),
+    "campaign_id": ("campaign id", "utm campaign", "campaign name", "campaign", "utm_campaign", "source campaign",
+                    "origin"),
     "channel": ("campaign type", "channel", "platform", "network", "source / medium", "medium", "source"),
     "spend_aed": ("amount spent", "cost", "spend", "amount", "budget spent"),
     "row_id": ("ad id", "ad set id", "adset id", "ad group id", "row id"),
-    "lead_id": ("record id", "lead id", "contact id", "person id", "lead", "contact", "reference"),
+    "lead_id": ("record id", "lead id", "mql id", "contact id", "person id", "lead", "mql", "contact", "reference"),
     "created_at": ("create date", "created at", "created date", "created", "first contact", "signup date"),
     "status": ("lifecycle stage", "deal stage", "stage", "status", "state"),
-    "customer_id": ("customer id", "customerid", "account id", "client id", "customer"),
+    "customer_id": ("customer id", "customerid", "account id", "client id", "seller id", "merchant id", "customer"),
     "transaction_id": ("invoice number", "invoiceno", "invoice no", "invoice", "order id", "order number",
                        "transaction id", "receipt number", "payment id"),
     "line_id": ("line item id", "lineitem sku", "line number", "line", "sku", "stock code", "stockcode", "item id"),
-    "value_aed": ("line total", "total", "amount", "value", "net amount", "grand total", "price", "subtotal"),
+    "value_aed": ("line total", "net sales", "net amount", "grand total", "line amount", "extended price",
+                  "order total", "sales", "revenue", "total", "amount", "value", "subtotal", "price"),
 }
 SOURCE_WORDS = {
     "ads": ("spend", "cost", "impressions", "clicks", "campaign", "ad set", "adset"),
@@ -73,6 +80,7 @@ class Export:
     encoding: str
     headers: list[str]
     rows: list[dict[str, str]]
+    header_row: int = 1
     entry: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
@@ -81,36 +89,60 @@ class Export:
         return [(row.get(header) or "").strip() for row in self.rows] if header else []
 
 
-def _score(header: str, words: tuple[str, ...]) -> int:
-    """How well a header names a field: an exact match beats a word inside it.
+EXACT = 300
 
-    The position of the word only breaks ties, so 'InvoiceNumber' still counts as a
-    match on 'invoice' however far down the list that word sits.
+
+def _plain(header: str) -> str:
+    """One spelling of a header, so order_id, Order ID and OrderID all read alike."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", header.strip())
+    return re.sub(r"\s+", " ", re.sub(r"[_\-.]+", " ", spaced)).strip().lower()
+
+
+def _matched(header: str, words: tuple[str, ...]) -> tuple[int, str]:
+    """How well a header names a field, and the word that matched.
+
+    A header equal to the word beats one that merely contains it. Among equals the
+    list order decides, so an id column wins a name column; among words merely
+    contained, the longer wins, so 'first contact' takes 'first_contact_date' from
+    'contact'. Whole words only: 'contact' does not match inside 'contacted'.
     """
-    plain = header.strip().lower()
+    plain = _plain(header)
+    best, matched = 0, ""
     for position, word in enumerate(words):
         if plain == word:
-            return 200 - position
-        if word in plain:
-            return 100 - position
-    return 0
+            score = EXACT - position * 4
+        elif re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", plain):
+            score = 100 + len(word) - position
+        else:
+            continue
+        if score > best:
+            best, matched = score, word
+    return best, matched
+
+
+def _score(header: str, words: tuple[str, ...]) -> int:
+    return _matched(header, words)[0]
 
 
 def _named(headers: list[str], words: tuple[str, ...]) -> str:
     found = [(_score(header, words), -index, header) for index, header in enumerate(headers)]
     found.sort(reverse=True)
-    return found[0][2] if found and found[0][0] >= 60 else ""
+    return found[0][2] if found and found[0][0] > 0 else ""
 
 
-def _read_sample(path: Path, delimiter: str, encoding: str) -> tuple[list[str], list[dict[str, str]]]:
+def _read_sample(
+    path: Path, delimiter: str, encoding: str, header_row: int = 1
+) -> tuple[list[str], list[dict[str, str]]]:
     with path.open("r", encoding=ENCODINGS[encoding], newline="") as handle:
         reader = csv.reader(handle, delimiter=DELIMITERS[delimiter])
         headers: list[str] = []
         rows: list[dict[str, str]] = []
-        for index, record in enumerate(reader):
-            if index == 0:
+        for index, record in enumerate(reader, start=1):
+            if index < header_row or not record:
+                continue
+            if not headers:
                 headers = record
-            elif record:
+            else:
                 rows.append(dict(zip(headers, record)))
             if len(rows) >= SAMPLE_ROWS:
                 break
@@ -123,17 +155,20 @@ def _reading(path: Path) -> Export | None:
     best_score = -1
     for encoding in ENCODINGS:
         for delimiter in DELIMITERS:
-            try:
-                headers, rows = _read_sample(path, delimiter, encoding)
-            except (UnicodeDecodeError, UnicodeError, csv.Error, OSError):
-                continue
-            if len(headers) < 2 or not rows:
-                continue
-            score = len(headers) * 10 + sum(1 for header in headers if header.strip() and header.isprintable())
-            score += sum(1 for row in rows if len(row) == len(headers))
-            if score > best_score:
-                best = Export(path, "", delimiter, encoding, headers, rows)
-                best_score = score
+            for header_row in range(1, MAX_PREAMBLE_ROWS + 1):
+                try:
+                    headers, rows = _read_sample(path, delimiter, encoding, header_row)
+                except (UnicodeDecodeError, UnicodeError, csv.Error, OSError):
+                    continue
+                if len(headers) < 2 or not rows:
+                    continue
+                score = len(headers) * 10 + sum(1 for header in headers if header.strip() and header.isprintable())
+                score += sum(1 for row in rows if len(row) == len(headers))
+                # A title above the header only wins if it genuinely reads better.
+                score -= header_row
+                if score > best_score:
+                    best = Export(path, "", delimiter, encoding, headers, rows, header_row)
+                    best_score = score
     return best
 
 
@@ -221,26 +256,50 @@ def _date_declaration(export: Export, header: str, field_name: str) -> tuple[lis
     return chosen, best, note
 
 
-def _amount_declaration(export: Export, header: str, field_name: str) -> tuple[dict[str, Any], float]:
-    """The separator, label and refund handling that read the most amounts."""
+def _labels(export: Export, headers: tuple[str, ...]) -> tuple[str, ...]:
+    """Text written beside the numbers, such as AED, $ or R$, taken from the values themselves."""
+    seen: dict[str, int] = {}
+    for row in export.rows:
+        for header in headers:
+            value = (row.get(header) or "").strip()
+            start, end = 0, len(value)
+            while start < len(value) and value[start] not in NUMBER_CHARACTERS:
+                start += 1
+            while end > start and value[end - 1] not in NUMBER_CHARACTERS:
+                end -= 1
+            for mark in (value[:start].strip(), value[end:].strip()):
+                if mark:
+                    seen[mark] = seen.get(mark, 0) + 1
+    return tuple(sorted(seen, key=lambda mark: (-seen[mark], mark))[:2])
+
+
+def _amount_declaration(
+    export: Export, header: str, field_name: str, value_from: tuple[str, tuple[str, str]] | None = None
+) -> tuple[dict[str, Any], float]:
+    """The decimal mark, separator, label and refund handling that read the most amounts."""
     best_declaration: dict[str, Any] = {}
     best_share = -1.0
-    for separator in ("", ","):
-        for label in ("", "AED"):
-            for refunds in ("reject", "negative_values") if export.source == "revenue" else ("reject",):
-                spec = FileSpec(export.source, Path("x"), "x", {field_name: header}, {},
-                                thousands_separator=separator, currency_label=label, refunds=refunds,
-                                fields=(field_name,))
-                share = _fraction(export.rows, spec, field_name, "read_amount")
-                if share > best_share:
-                    declaration: dict[str, Any] = {}
-                    if separator:
-                        declaration["thousands_separator"] = separator
-                    if label:
-                        declaration["currency_label"] = label
-                    if refunds != "reject":
-                        declaration["refunds"] = refunds
-                    best_declaration, best_share = declaration, share
+    columns = {} if value_from else {field_name: header}
+    labels = ("",) + _labels(export, value_from[1] if value_from else (header,))
+    for decimal in DECIMAL_MARKS:
+        for separator in ("", DECIMAL_MARKS[decimal]):
+            for label in labels:
+                for refunds in ("reject", "negative_values") if export.source == "revenue" else ("reject",):
+                    spec = FileSpec(export.source, Path("x"), "x", columns, {},
+                                    thousands_separator=separator, decimal=decimal, currency_label=label,
+                                    refunds=refunds, value_from=value_from, fields=(field_name,))
+                    share = _fraction(export.rows, spec, field_name, "read_amount")
+                    if share > best_share:
+                        declaration: dict[str, Any] = {}
+                        if separator:
+                            declaration["thousands_separator"] = separator
+                        if decimal != "point":
+                            declaration["decimal"] = decimal
+                        if label:
+                            declaration["currency_label"] = label
+                        if refunds != "reject":
+                            declaration["refunds"] = refunds
+                        best_declaration, best_share = declaration, share
     return best_declaration, best_share
 
 
@@ -252,12 +311,24 @@ def _overlap(left: list[str], right: list[str]) -> float:
 def _map_columns(export: Export, fields: tuple[str, ...], excluded: tuple[str, ...] = ()) -> None:
     taken: set[str] = set(name for name in excluded if name)
     columns: dict[str, str] = {}
+    evidence: dict[str, str] = {}
+    scored = sorted(
+        (
+            (*_matched(header, FIELD_WORDS[name]), name, index, header)
+            for name in fields
+            for index, header in enumerate(export.headers)
+        ),
+        key=lambda item: (-item[0], item[3], item[4]),
+    )
+    for score, word, name, _index, header in scored:
+        if score <= 0 or name in columns or header in taken:
+            continue
+        taken.add(header)
+        columns[name] = header
+        evidence[name] = "header matched" if score >= EXACT else f"header contains '{word}'"
     for name in fields:
-        header = _named([header for header in export.headers if header not in taken], FIELD_WORDS[name])
-        if header:
-            taken.add(header)
-            columns[name] = header
-            export.notes.append(f"| {name} | `{header}` | header matched |")
+        if name in columns:
+            export.notes.append(f"| {name} | `{columns[name]}` | {evidence[name]} |")
         elif name == "channel" and export.source == "ads":
             stem = export.path.stem.lower()
             platform = next((title for word, title in PLATFORM_NAMES.items() if word in stem), "")
@@ -332,6 +403,9 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
 
     for export in exports:
         export.entry["file"] = export.path.name
+        if export.header_row > 1:
+            export.entry["header_row"] = export.header_row
+            export.notes.append(f"| header row | line {export.header_row} | the lines above it are not column names |")
         if export.delimiter != "comma":
             export.entry["delimiter"] = export.delimiter
         if export.encoding != "utf-8":
@@ -358,8 +432,14 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
         if AMOUNT_FIELDS[export.source] and not set(AMOUNT_FIELDS[export.source]) & set(export.entry["columns"]):
             quantity, price = _named(export.headers, QUANTITY_WORDS), _named(export.headers, UNIT_PRICE_WORDS)
             if quantity and price:
+                amount_field = AMOUNT_FIELDS[export.source][0]
+                computed, share = _amount_declaration(export, "", amount_field, ("multiply", (quantity, price)))
+                if computed:
+                    export.entry.setdefault("amounts", {}).update(computed)
                 export.entry.setdefault("amounts", {})["value_from"] = {"multiply": [quantity, price]}
-                export.notes.append(f"| value | computed | `{quantity}` × `{price}`, as no total column was found |")
+                export.notes = [note for note in export.notes if not note.startswith(f"| {amount_field} |")]
+                export.notes.append(f"| {amount_field} | computed | `{quantity}` × `{price}`, as no column names a "
+                                    "total. Check this is the line total before running |")
         currency = _named(export.headers, CURRENCY_WORDS)
         if currency and AMOUNT_FIELDS[export.source]:
             codes = sorted({(row.get(currency) or "").strip().upper() for row in export.rows} - {""})[:10]
