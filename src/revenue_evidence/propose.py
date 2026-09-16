@@ -66,6 +66,9 @@ CURRENCY_WORDS = ("currency", "currency code", "ccy")
 QUANTITY_WORDS = ("quantity", "qty", "units", "lineitem quantity")
 UNIT_PRICE_WORDS = ("unit price", "price", "rate", "lineitem price", "unit cost")
 NEEDS_YOU = "**needs you**"
+# A choice only a person can make blocks a run; one whose cost is visible in the
+# report — rows that will be refused and listed — is worth checking but not blocking.
+CHECK = "**check**"
 # A file name is evidence of the platform when an export carries no channel column.
 PLATFORM_NAMES = {
     "meta": "Meta", "facebook": "Meta", "instagram": "Meta", "google": "Google Ads", "gads": "Google Ads",
@@ -119,6 +122,11 @@ def _matched(header: str, words: tuple[str, ...]) -> tuple[int, str]:
         if score > best:
             best, matched = score, word
     return best, matched
+
+
+def advisory(report: str) -> list[str]:
+    """Lines worth a look whose consequence is already visible in the report."""
+    return [line for line in report.split("\n") if CHECK in line and line.startswith("|")]
 
 
 def unresolved(report: str) -> list[str]:
@@ -345,8 +353,8 @@ def _map_columns(export: Export, fields: tuple[str, ...], excluded: tuple[str, .
             platform = next((title for word, title in PLATFORM_NAMES.items() if word in stem), "")
             if platform:
                 export.entry.setdefault("fixed", {})["channel"] = platform
-                export.notes.append(f"| channel | fixed as {platform} | no channel column; the file name says "
-                                    f"`{export.path.name}`. Change it if that is not the platform |")
+                export.notes.append(f"| channel | fixed as {platform} | {CHECK}: no channel column; the file name "
+                                    f"says `{export.path.name}`. Change it if that is not the platform |")
             else:
                 export.notes.append(
                     f'| channel | — | {NEEDS_YOU}: no channel column. Add `"fixed": {{"channel": "Meta"}}` '
@@ -391,7 +399,9 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
 
     lines = [f"# Proposed engagement config for {name}", "",
              "Every choice below was read from the exports. Check each one, especially any",
-             f"line marked {NEEDS_YOU}, then rename the draft to `engagement.json`.", ""]
+             f"line marked {NEEDS_YOU}, which is a choice only you can make. A line marked {CHECK} is worth",
+             "reading but does not stop a run: values that do not match a declaration are refused and",
+             "listed in the report rather than counted. Rename the draft to `engagement.json` when it is right.", ""]
 
     crm = next((export for export in exports if export.source == "crm"), None)
     revenue = next((export for export in exports if export.source == "revenue"), None)
@@ -431,14 +441,14 @@ def propose(folder: Path, name: str, data_origin: str = "client") -> tuple[dict[
                 export.entry["date_format"] = formats[0] if len(formats) == 1 else formats
                 explained = note or f"{' or '.join(formats)} reads {share:.0%} of sampled values"
                 if not note and share <= 0.95:
-                    explained += f" {NEEDS_YOU}: check the format"
+                    explained += f" {CHECK}: values that do not match are refused and listed"
                 export.notes.append(f"| dates | `{header}` | {explained} |")
             if name_of_field in AMOUNT_FIELDS[export.source]:
                 declaration, share = _amount_declaration(export, header, name_of_field)
                 if declaration:
                     export.entry["amounts"] = declaration
                 described = ", ".join(f"{key} {value}" for key, value in declaration.items()) or "plain decimals"
-                mark = "" if share > 0.95 else f" {NEEDS_YOU}: check the amount format"
+                mark = "" if share > 0.95 else f" {CHECK}: values that do not match are refused and listed"
                 export.notes.append(f"| amounts | `{header}` | {described} reads {share:.0%} of sampled values{mark} |")
         if AMOUNT_FIELDS[export.source] and not set(AMOUNT_FIELDS[export.source]) & set(export.entry["columns"]):
             quantity, price = _named(export.headers, QUANTITY_WORDS), _named(export.headers, UNIT_PRICE_WORDS)

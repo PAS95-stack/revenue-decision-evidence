@@ -33,9 +33,10 @@ import json
 import re
 import sys
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 CENT = Decimal("0.01")
 PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
@@ -157,6 +158,10 @@ OPTIONAL = {"ads": ("row_id",), "crm": (), "revenue": ("line_id",)}
 AMOUNT = {"ads": ("spend_aed",), "crm": (), "revenue": ("value_aed",)}
 
 
+# A name no export can carry, so a looked-up value reads like any other column.
+LOOKUP_PREFIX = "\x00lookup:"
+
+
 def _included(row: dict, spec: dict) -> bool:
     if not spec["filter_column"]:
         return True
@@ -172,13 +177,37 @@ def _field(row: dict, spec: dict, name: str) -> str:
     return value.upper() if name in spec["uppercase"] else value
 
 
+MONTH_WORDS: dict[int, tuple[str, ...]] = {
+    1: ("january", "janvier", "januar", "enero", "janeiro", "gennaio", "januari", "\u064a\u0646\u0627\u064a\u0631"),
+    2: ("february", "f\u00e9vrier", "fevrier", "februar", "febrero", "fevereiro", "febbraio", "februari",
+        "\u0641\u0628\u0631\u0627\u064a\u0631"),
+    3: ("march", "mars", "m\u00e4rz", "marz", "maerz", "marzo", "mar\u00e7o", "marco", "maart", "mrt",
+        "\u0645\u0627\u0631\u0633"),
+    4: ("april", "avril", "abril", "aprile", "\u0623\u0628\u0631\u064a\u0644", "\u0627\u0628\u0631\u064a\u0644"),
+    5: ("may", "mai", "mayo", "maio", "maggio", "mei", "\u0645\u0627\u064a\u0648"),
+    6: ("june", "juin", "juni", "junio", "junho", "giugno", "\u064a\u0648\u0646\u064a\u0648"),
+    7: ("july", "juillet", "juli", "julio", "julho", "luglio", "\u064a\u0648\u0644\u064a\u0648"),
+    8: ("august", "ao\u00fbt", "aout", "agosto", "augustus", "\u0623\u063a\u0633\u0637\u0633",
+        "\u0627\u063a\u0633\u0637\u0633"),
+    9: ("september", "septembre", "septiembre", "setiembre", "setembro", "settembre",
+        "\u0633\u0628\u062a\u0645\u0628\u0631"),
+    10: ("october", "octobre", "oktober", "octubre", "outubro", "ottobre", "\u0623\u0643\u062a\u0648\u0628\u0631",
+         "\u0627\u0643\u062a\u0648\u0628\u0631"),
+    11: ("november", "novembre", "noviembre", "novembro", "\u0646\u0648\u0641\u0645\u0628\u0631"),
+    12: ("december", "d\u00e9cembre", "decembre", "dezember", "diciembre", "dezembro", "dicembre",
+         "\u062f\u064a\u0633\u0645\u0628\u0631"),
+}
+# Full names and their 3- and 4-letter openings. A spelling two months share, such as
+# the French "jui" of juin and juillet, is dropped: it is refused, never guessed.
 MONTH_NUMBERS: dict[str, int] = {}
-for _index, _name in enumerate(
-    ("january", "february", "march", "april", "may", "june", "july", "august",
-     "september", "october", "november", "december"), start=1
-):
-    MONTH_NUMBERS[_name] = _index
-    MONTH_NUMBERS[_name[:3]] = _index
+_shared: set[str] = set()
+for _number, _spellings in MONTH_WORDS.items():
+    for _spelling in _spellings:
+        for _key in {_spelling, _spelling[:3], _spelling[:4]}:
+            if len(_key) >= 3 and MONTH_NUMBERS.setdefault(_key, _number) != _number:
+                _shared.add(_key)
+for _key in _shared:
+    MONTH_NUMBERS.pop(_key, None)
 MONTH_NUMBERS["sept"] = 9
 CENTURY_BREAK = 69
 FORMAT_SEPARATORS = "-/., :"
@@ -246,7 +275,14 @@ def _numeric_order(name: str) -> str:
     return ""
 
 
-def _one_declared_date(text: str, fmt: str, shift: int) -> date | None:
+def _named_zone(name: str):
+    try:
+        return ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        return None
+
+
+def _one_declared_date(text: str, fmt: str, shift: int, zone_name: str = "", reporting: str = "") -> date | None:
     day_part, joiner, time_part = _split_written_format(fmt)
     day_pieces = _written_pieces(day_part, DAY_TOKENS)
     time_pieces = _written_pieces(time_part, TIME_TOKENS) if time_part else []
@@ -259,7 +295,7 @@ def _one_declared_date(text: str, fmt: str, shift: int) -> date | None:
     def take(piece: str, position: int) -> int:
         if piece in ("MMM", "MMMM"):
             start = position
-            while position < len(text) and text[position].isalpha() and position - start < 9:
+            while position < len(text) and text[position].isalpha() and position - start < 12:
                 position += 1
             month = MONTH_NUMBERS.get(text[start:position].lower())
             if month is None or position - start < 3:
@@ -343,13 +379,17 @@ def _one_declared_date(text: str, fmt: str, shift: int) -> date | None:
     except (KeyError, TypeError, ValueError):
         return None
     if zone:
-        moment -= timedelta(minutes=offset_minutes)
+        moment = moment.replace(tzinfo=timezone(timedelta(minutes=offset_minutes)))
+    elif zone_name:
+        moment = moment.replace(tzinfo=ZoneInfo(zone_name))
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(ZoneInfo(reporting or "UTC")).replace(tzinfo=None)
     return (moment + timedelta(hours=shift)).date() if shift else moment.date()
 
 
-def _declared_date(text: str, formats, shift: int = 0) -> date | None:
+def _declared_date(text: str, formats, shift: int = 0, zone_name: str = "", reporting: str = "") -> date | None:
     for fmt in ([formats] if isinstance(formats, str) else formats):
-        found = _one_declared_date(text, fmt, shift)
+        found = _one_declared_date(text, fmt, shift, zone_name, reporting)
         if found is not None:
             return found
     return None
@@ -417,6 +457,8 @@ def _plain_spec(name: str, path) -> dict:
         "path": Path(path), "label": "", "columns": {field: field for field in REQUIRED[name]}, "fixed": {},
         "date_formats": ("YYYY-MM-DD",), "time_shift": 0, "value_from": None, "currency_column": "",
         "currency_rates": {}, "thousands_separator": "", "decimal": "point", "header_row": 1,
+        "time_zone": "", "reporting_time_zone": "UTC",
+        "lookup_path": None, "lookup_match": ("", ""), "lookup_columns": {},
         "currency_label": "", "currency": "AED",
         "aed_per_unit": "1", "rate_source": "", "refunds": "reject", "uppercase": set(), "required": REQUIRED[name],
         "filter_column": "", "filter_values": (), "delimiter": "comma", "encoding": "utf-8",
@@ -451,6 +493,8 @@ def _load_config(path) -> dict:
     need(rule == "unattributed" or join == "customer_id", "multiple_campaigns needs revenue_join customer_id")
     threshold = config.get("coverage_threshold_percent", "80")
     need(isinstance(threshold, str) and PLAIN_DECIMAL.fullmatch(threshold) is not None, "coverage_threshold_percent is invalid")
+    reporting_zone = config.get("reporting_time_zone", "UTC")
+    need(isinstance(reporting_zone, str) and _named_zone(reporting_zone) is not None, "reporting_time_zone is invalid")
     windows = config.get("attribution_windows_days", DEFAULT_WINDOWS)
     need(
         isinstance(windows, list) and 1 <= len(windows) <= 5
@@ -479,9 +523,31 @@ def _load_config(path) -> dict:
             )
             columns, fixed = entry.get("columns", {}), entry.get("fixed", {})
             need(isinstance(columns, dict) and isinstance(fixed, dict), f"{label}: columns and fixed must be objects")
-            # An amount computed from other columns has no column of its own to declare.
+            # An amount computed from other columns, or a field a second export supplies,
+            # has no column of its own to declare in this file.
             declared_amounts = entry.get("amounts") if isinstance(entry.get("amounts"), dict) else {}
-            expected = set(required[name]) - (set(AMOUNT[name]) if declared_amounts.get("value_from") else set())
+            declared_lookup = entry.get("lookup") if isinstance(entry.get("lookup"), dict) else None
+            lookup_taken = declared_lookup.get("columns") if declared_lookup else None
+            lookup_fields = set(lookup_taken) if isinstance(lookup_taken, dict) else set()
+            need(
+                entry.get("lookup") is None or (
+                    declared_lookup is not None
+                    and set(declared_lookup) == {"file", "match", "columns"}
+                    and isinstance(declared_lookup.get("file"), str) and declared_lookup["file"]
+                    and isinstance(declared_lookup.get("match"), dict) and len(declared_lookup["match"]) == 1
+                    and all(isinstance(k, str) and isinstance(v, str) for k, v in declared_lookup["match"].items())
+                    and isinstance(lookup_taken, dict) and lookup_taken
+                    and all(isinstance(v, str) and v for v in lookup_taken.values())
+                    and lookup_fields <= set(required[name]) | set(OPTIONAL[name])
+                    and not lookup_fields & (set(columns) | set(fixed))
+                ),
+                f"{label}: invalid lookup",
+            )
+            expected = (
+                set(required[name])
+                - (set(AMOUNT[name]) if declared_amounts.get("value_from") else set())
+                - lookup_fields
+            )
             need(
                 not set(columns) & set(fixed)
                 and sorted(set(columns) | set(fixed)) == sorted(expected | (set(columns) & set(OPTIONAL[name])))
@@ -506,6 +572,11 @@ def _load_config(path) -> dict:
             )
             shift = entry.get("time_zone_shift_hours", 0)
             need(type(shift) is int and -14 <= shift <= 14, f"{label}: invalid time_zone_shift_hours")
+            zone_name = entry.get("time_zone", "")
+            need(
+                isinstance(zone_name, str) and (not zone_name or (_named_zone(zone_name) is not None and not shift)),
+                f"{label}: invalid time_zone",
+            )
             value_from = amounts_of(entry).get("value_from")
             parsed_value = None
             if value_from is not None:
@@ -547,11 +618,20 @@ def _load_config(path) -> dict:
                 f"{label}: invalid uppercase",
             )
             spec = {
-                "path": config_path.parent / label, "label": label, "columns": columns, "fixed": fixed,
+                "path": config_path.parent / label, "label": label,
+                "columns": {
+                    **columns,
+                    **{field: LOOKUP_PREFIX + header for field, header in (lookup_taken or {}).items()},
+                },
+                "fixed": fixed,
+                "lookup_path": (config_path.parent / declared_lookup["file"]) if declared_lookup else None,
+                "lookup_match": next(iter(declared_lookup["match"].items())) if declared_lookup else ("", ""),
+                "lookup_columns": dict(lookup_taken) if declared_lookup else {},
                 "date_formats": tuple(date_formats), "time_shift": shift, "value_from": parsed_value,
                 "currency_column": currency_column, "currency_rates": {k: v for k, v in currency_rates.items()}, "thousands_separator": amounts.get("thousands_separator", ""),
                 "currency_label": amounts.get("currency_label", ""), "currency": code, "aed_per_unit": rate,
                 "decimal": amounts.get("decimal", "point"), "header_row": entry.get("header_row", 1),
+                "time_zone": zone_name, "reporting_time_zone": reporting_zone,
                 "rate_source": currency.get("rate_source", ""), "refunds": refunds, "uppercase": set(uppercase),
                 "required": required[name],
                 "delimiter": delimiter, "encoding": encoding,
@@ -561,14 +641,24 @@ def _load_config(path) -> dict:
             files[name].append(spec)
             described.append(
                 {
-                    "source": name, "file": label, "columns": dict(columns), "fixed": dict(fixed),
+                    "source": name, "file": label,
+                    "columns": {k: v for k, v in columns.items() if not v.startswith(LOOKUP_PREFIX)},
+                    "fixed": dict(fixed),
                     "date_formats": list(date_formats), "time_zone_shift_hours": shift, "value_from": parsed_value,
                     "currency_column": currency_column,
                     "currency_rates": dict(sorted(currency_rates.items())),
                     "delimiter": delimiter, "encoding": encoding,
                     "thousands_separator": spec["thousands_separator"],
                     "currency_label": spec["currency_label"], "currency": code, "aed_per_unit": rate,
-                    "decimal": spec["decimal"], "header_row": spec["header_row"],
+                    "decimal": spec["decimal"], "header_row": spec["header_row"], "time_zone": zone_name,
+                    "lookup": (
+                        {
+                            "file": declared_lookup["file"],
+                            "match": dict(declared_lookup["match"]),
+                            "columns": dict(lookup_taken),
+                        }
+                        if declared_lookup else None
+                    ),
                     "rate_source": spec["rate_source"], "refunds": refunds, "uppercase": sorted(set(uppercase)),
                     "include_when": {"column": chosen["column"], "values": sorted({v.casefold() for v in chosen["values"]})} if chosen else None,
                 }
@@ -592,6 +682,7 @@ def _load_config(path) -> dict:
             "revenue_join": join,
             "multiple_campaigns": rule,
             "coverage_threshold_percent": threshold,
+            "reporting_time_zone": reporting_zone,
             "files": described,
         },
     }
@@ -674,7 +765,25 @@ def _read_rows(spec: dict) -> list[tuple[int, dict]]:
         for absent in fieldnames[len(record):]:
             row[absent] = None
         rows.append(row)
-    headers = [spec["columns"][field] for field in spec["required"] if field in spec["columns"]]
+    rows_with_lines = [(start, row) for (start, _record), row in zip(kept[1:], rows)]
+    if spec["lookup_path"] is not None:
+        their_key, my_key = spec["lookup_match"]
+        second = dict(spec, path=spec["lookup_path"], label=spec["lookup_path"].name, columns={}, fixed={},
+                      required=(), filter_column="", filter_values=(), currency_column="", value_from=None,
+                      lookup_path=None, lookup_columns={})
+        carried: dict[str, dict] = {}
+        for _line, other in _read_rows(second):
+            key = _text(other, their_key)
+            if key and key not in carried:
+                carried[key] = other
+        for _line, row in rows_with_lines:
+            match = carried.get(_text(row, my_key))
+            for field, header in spec["lookup_columns"].items():
+                row[LOOKUP_PREFIX + header] = _text(match, header) if match else ""
+    headers = [
+        spec["columns"][field] for field in spec["required"]
+        if field in spec["columns"] and not spec["columns"][field].startswith(LOOKUP_PREFIX)
+    ]
     headers += [header for header in (
         spec["filter_column"], spec["currency_column"], *(spec["value_from"]["columns"] if spec["value_from"] else ())
     ) if header]
@@ -684,7 +793,7 @@ def _read_rows(spec: dict) -> list[tuple[int, dict]]:
     repeated = sorted({header for header in headers if fieldnames.count(header) > 1})
     if repeated:
         raise ReconstructionError(f"{name} has more than one column named {', '.join(repeated)}")
-    return [(start, row) for (start, _record), row in zip(kept[1:], rows)]
+    return rows_with_lines
 
 
 def _read_csv_output(path: Path) -> list[dict]:
@@ -745,7 +854,9 @@ def derive(
 
     def read_date(row: dict, spec: dict, field: str):
         text = _field(row, spec, field)
-        return _declared_date(text, spec["date_formats"], spec["time_shift"]) if spec["label"] else _day(text)
+        return _declared_date(
+            text, spec["date_formats"], spec["time_shift"], spec["time_zone"], spec["reporting_time_zone"]
+        ) if spec["label"] else _day(text)
 
     def read_amount(row: dict, spec: dict, field: str):
         return _declared_amount(row, spec, field) if spec["label"] else _amount(_field(row, spec, field))
@@ -1040,6 +1151,10 @@ def verify_outputs(source_paths: dict | None, output_dir) -> tuple[list[str], li
         if config:
             inputs = config["files"]
             files = [(f"{name}/{spec['label']}", spec["path"]) for name in SOURCES for spec in inputs[name]]
+            files += [
+                (f"{name}/{spec['lookup_path'].name}", spec["lookup_path"])
+                for name in SOURCES for spec in inputs[name] if spec["lookup_path"] is not None
+            ]
             published_engagement = report.get("engagement") or {}
             if published_engagement.get("config_fingerprint") != config["fingerprint"]:
                 fail("engagement_config", "the engagement config changed since the report was computed")

@@ -36,9 +36,16 @@ python3 scripts/engagement.py ingest ~/engagements/acme-2026-09 --received-on 20
 ```
 
 The first call creates the folder and asks for the exports. Put them in `inputs/` and
-repeat it. The draft is printed with the evidence for every choice; anything the data
-cannot settle is listed as a decision for you, and the run does not start until you have
-settled it. Add `--accept-draft` to run straight away when the draft needs no decisions.
+repeat it. The draft is printed with the evidence for every choice, and its lines are
+marked two ways:
+
+- **needs you** — a choice only a person can make, such as an exchange rate, a date that
+  reads both ways, or a field no column matched. A run does not start until it is settled.
+- **check** — worth reading, but the cost of leaving it is already visible: values that do
+  not match the declaration are refused and listed in the report rather than counted.
+
+Add `--accept-draft` to run once nothing is marked **needs you**; anything marked
+**check** is printed first, so what was left unresolved stays in front of you.
 
 The numbered steps below are the same journey done one piece at a time, and remain the
 way to re-run an engagement, change a declaration, or close it.
@@ -110,6 +117,7 @@ Google Ads, HubSpot and Xero-shaped files.
 | `data_origin` | yes | `client`, `public` or `synthetic`. Sets the brief's status line; `client` also enforces the folder guard |
 | `sources` | yes | `ads`, `crm` and `revenue`, each a list of 1 to 20 files |
 | `coverage_threshold_percent` | no | The coverage below which the report calls attribution weak, as a string such as `"70"`. Default `"80"`. A planning choice, not a validated threshold |
+| `reporting_time_zone` | no | The zone every date is stated in, as an IANA name such as `Asia/Dubai`. Default `UTC`. It only matters when a file declares the zone its timestamps are written in, or a value carries its own offset |
 | `attribution_windows_days` | no | 1 to 5 increasing whole days up to 999. Default `[30, 60, 90]`. Use longer windows for long sales cycles, such as `[90, 180, 365]` |
 | `channel_aliases` | no | Channel names as written, matched without regard to letter case, mapped to the name to report: `{"search": "Paid Search"}` |
 | `revenue_join` | no | `lead_id` (default) or `customer_id` |
@@ -125,8 +133,9 @@ Google Ads, HubSpot and Xero-shaped files.
 | `delimiter` | no | `comma` (default), `semicolon` (Excel in many locales) or `tab` |
 | `encoding` | no | `utf-8` (default, byte-order mark allowed), `utf-16`, `windows-1252` or `latin-1` |
 | `header_row` | no | The line the column names sit on, 1 by default. Advertising platforms print a report title and a date range above them; declare `3` rather than editing the export. Row references stay the lines of the file as delivered |
-| `date_format` | no | How this file writes a date, built from `YYYY`, `YY`, `MMMM` (July), `MMM` (Jul), `MM`, `M`, `DD` and `D` with the separators `-` `/` `.` and space: `YYYY-MM-DD` (default), `DD/MM/YYYY`, `DD.MM.YYYY`, `D MMM YYYY`, `MMM D, YYYY`, `DD-MMM-YY` and so on. Add a time as ` HH:MM`, ` HH:MM:SS`, `THH:MM:SS` or ` HH:MM AM`; a value may also carry `Z` or `+04:00`, and then the instant is converted before the day is taken. Two-digit years read 69–99 as the 1900s and 00–68 as the 2000s. A list declares several for one file, tried in order. Declaring both a day-first and a month-first numeric shape is refused, because `03/07/2026` would be two dates |
+| `date_format` | no | How this file writes a date, built from `YYYY`, `YY`, `MMMM` (July), `MMM` (Jul), `MM`, `M`, `DD` and `D` with the separators `-` `/` `.` and space: `YYYY-MM-DD` (default), `DD/MM/YYYY`, `DD.MM.YYYY`, `D MMM YYYY`, `MMM D, YYYY`, `DD-MMM-YY` and so on. Add a time as ` HH:MM`, ` HH:MM:SS`, `THH:MM:SS` or ` HH:MM AM`; a value may also carry `Z` or `+04:00`, and then the instant is converted before the day is taken. Two-digit years read 69–99 as the 1900s and 00–68 as the 2000s. Month names are read in English, Arabic, French, German, Spanish, Portuguese, Italian and Dutch, in full or shortened, with or without accents; a shortening two months share, such as the French `jui` of juin and juillet, is refused rather than guessed. A list declares several for one file, tried in order. Declaring both a day-first and a month-first numeric shape is refused, because `03/07/2026` would be two dates |
 | `time_zone_shift_hours` | no | Whole hours from −14 to 14 added before the day is taken, for an export written in another time zone. Every declared `date_format` must carry a time |
+| `time_zone` | no | The zone this file's timestamps are written in, as an IANA name such as `America/Sao_Paulo`. Values are then stated in `reporting_time_zone` before the day is taken, so summer time is handled rather than assumed. Every declared `date_format` must carry a time, and a file declares this or `time_zone_shift_hours`, not both |
 | `amounts.thousands_separator` | no | `","` or `""` with a decimal point; `"."` or `""` with a decimal comma |
 | `amounts.decimal` | no | `point` (default) reads `1,234.56`; `comma` reads `1.234,56`, as Excel writes it in many locales |
 | `amounts.currency_label` | no | Text written beside the number, before or after it: `AED`, `USD`, `$` or `R$`. Up to 8 characters and no digits |
@@ -138,6 +147,7 @@ Google Ads, HubSpot and Xero-shaped files.
 | `include_when` | no | Keep only rows whose column holds one of these values, compared without regard to letter case: `{"column": "Status", "values": ["PAID"]}`. Excluded rows get the status `filtered`, keep their amount, and are reported as a finding |
 | `columns.row_id` | advertising | The export's own row identifier (ad set ID, ad ID). Without it, two genuinely identical rows count once |
 | `columns.line_id` | revenue | Declares a line-item export: the column identifying the line within an invoice (line number, SKU). Declare it in every revenue file or none |
+| `lookup` | no | Fill a field from a second export that shares a key, when one system exports the record across two files: `{"file": "deals.csv", "match": {"their_key": "my_key"}, "columns": {"customer_id": "seller_id"}}`. The second file is read the same way as this one, is fingerprinted into `run_id`, and must be logged at intake. A row whose key is not in it keeps an empty value, so it is refused and named rather than quietly filled |
 
 Fields per export: advertising `date`, `campaign_id`, `channel`, `spend_aed` (and
 optionally `row_id`); CRM

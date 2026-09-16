@@ -22,15 +22,21 @@ or evidence of paid validation.
 - **Never recommends moving budget.** The report lists data-quality findings and
   the questions that need answers, and always states: *Do not reallocate budget
   from this evidence set alone.*
-- **Reads real exports through a declared engagement config.** Column names,
-  separators and encodings (including semicolon-separated Windows-1252 files),
-  dates in any common shape (month names, two-digit years, dot or dash separators,
-  12-hour times, `Z` and `+04:00` offsets) converted to one calendar date, several
-  date shapes within one file, a total computed from quantity and unit price, a currency named per row, European numbers such as `1.234,56`, a currency
-  symbol beside the amount, a header below a report title, time-zone shifts, ad
-  accounts in other currencies, refunds and credit notes, revenue that names
-  customers rather than leads, and attribution windows are declared per
-  engagement, never guessed.
+- **Reads real exports through a declared engagement config.** Declared per
+  engagement, never guessed:
+  - **Dates** in any common shape — month names in eight languages, two-digit
+    years, dot or dash separators, 12-hour times, `Z` and `+04:00` offsets, or a
+    named zone such as `America/Sao_Paulo` stated in the engagement's reporting
+    zone — each converted to one calendar date, with several shapes allowed in one
+    file.
+  - **Amounts** with European numbers such as `1.234,56`, a currency symbol beside
+    the number, a currency named per row, a total computed from quantity and unit
+    price, ad accounts in other currencies, refunds and credit notes.
+  - **Files** with any separator and encoding (including semicolon-separated
+    Windows-1252), a header below a report title, revenue that names customers
+    rather than leads, a field filled from a second export that shares a key, and
+    the attribution windows to report.
+
   `propose` drafts the config from the exports themselves and marks what only a
   person can decide. See [`docs/engagements.md`](docs/engagements.md).
 - **Publishes only what an independent check reproduces.**

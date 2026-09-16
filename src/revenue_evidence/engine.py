@@ -9,13 +9,14 @@ import shutil
 import tempfile
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
 from typing import Any, Iterable
 
 from .reconstruct import verify_outputs
+from zoneinfo import ZoneInfo
 
 
 MONEY = Decimal("0.01")
@@ -251,13 +252,13 @@ DATA_ORIGINS = ("synthetic", "public", "client")
 CONFIG_KEYS = frozenset(
     {
         "config_version", "engagement", "data_origin", "attribution_windows_days", "channel_aliases", "revenue_join",
-        "multiple_campaigns", "coverage_threshold_percent", "sources",
+        "multiple_campaigns", "coverage_threshold_percent", "reporting_time_zone", "sources",
     }
 )
 FILE_KEYS = frozenset(
     {
         "file", "columns", "fixed", "date_format", "amounts", "uppercase", "include_when", "delimiter", "encoding",
-        "time_zone_shift_hours", "header_row",
+        "time_zone_shift_hours", "header_row", "time_zone", "lookup",
     }
 )
 MAX_FILES_PER_SOURCE = 20
@@ -267,21 +268,45 @@ MAX_WINDOWS = 5
 # parts, and every shape is converted to the one calendar date the report works in. The
 # declaration is what makes 03/07/2026 a single date rather than both 3 July and 7 March:
 # the tool reads many shapes, but it never decides between two readings of one value.
+MONTH_WORDS: dict[int, tuple[str, ...]] = {
+    1: ("january", "janvier", "januar", "enero", "janeiro", "gennaio", "januari", "\u064a\u0646\u0627\u064a\u0631"),
+    2: ("february", "f\u00e9vrier", "fevrier", "februar", "febrero", "fevereiro", "febbraio", "februari",
+        "\u0641\u0628\u0631\u0627\u064a\u0631"),
+    3: ("march", "mars", "m\u00e4rz", "marz", "maerz", "marzo", "mar\u00e7o", "marco", "maart", "mrt",
+        "\u0645\u0627\u0631\u0633"),
+    4: ("april", "avril", "abril", "aprile", "\u0623\u0628\u0631\u064a\u0644", "\u0627\u0628\u0631\u064a\u0644"),
+    5: ("may", "mai", "mayo", "maio", "maggio", "mei", "\u0645\u0627\u064a\u0648"),
+    6: ("june", "juin", "juni", "junio", "junho", "giugno", "\u064a\u0648\u0646\u064a\u0648"),
+    7: ("july", "juillet", "juli", "julio", "julho", "luglio", "\u064a\u0648\u0644\u064a\u0648"),
+    8: ("august", "ao\u00fbt", "aout", "agosto", "augustus", "\u0623\u063a\u0633\u0637\u0633",
+        "\u0627\u063a\u0633\u0637\u0633"),
+    9: ("september", "septembre", "septiembre", "setiembre", "setembro", "settembre",
+        "\u0633\u0628\u062a\u0645\u0628\u0631"),
+    10: ("october", "octobre", "oktober", "octubre", "outubro", "ottobre", "\u0623\u0643\u062a\u0648\u0628\u0631",
+         "\u0627\u0643\u062a\u0648\u0628\u0631"),
+    11: ("november", "novembre", "noviembre", "novembro", "\u0646\u0648\u0641\u0645\u0628\u0631"),
+    12: ("december", "d\u00e9cembre", "decembre", "dezember", "diciembre", "dezembro", "dicembre",
+         "\u062f\u064a\u0633\u0645\u0628\u0631"),
+}
+# Full names and their 3- and 4-letter openings. A spelling two months share, such as
+# the French "jui" of juin and juillet, is dropped: it is refused, never guessed.
 MONTH_NUMBERS: dict[str, int] = {}
-for _index, _name in enumerate(
-    ("january", "february", "march", "april", "may", "june", "july", "august",
-     "september", "october", "november", "december"), start=1
-):
-    MONTH_NUMBERS[_name] = _index
-    MONTH_NUMBERS[_name[:3]] = _index
+_shared: set[str] = set()
+for _number, _spellings in MONTH_WORDS.items():
+    for _spelling in _spellings:
+        for _key in {_spelling, _spelling[:3], _spelling[:4]}:
+            if len(_key) >= 3 and MONTH_NUMBERS.setdefault(_key, _number) != _number:
+                _shared.add(_key)
+for _key in _shared:
+    MONTH_NUMBERS.pop(_key, None)
 MONTH_NUMBERS["sept"] = 9
 # Two-digit years: 69 to 99 are the 1900s, 00 to 68 are the 2000s, as POSIX has it.
 CENTURY_BREAK = 69
 _DATE_TOKENS = {
     "YYYY": r"(?P<y>[0-9]{4})",
     "YY": r"(?P<yy>[0-9]{2})",
-    "MMMM": r"(?P<name>[A-Za-z]{3,9})",
-    "MMM": r"(?P<name>[A-Za-z]{3,9})",
+    "MMMM": r"(?P<name>[^\W\d_]{3,12})",
+    "MMM": r"(?P<name>[^\W\d_]{3,12})",
     "MM": r"(?P<m>[0-9]{1,2})",
     "M": r"(?P<m>[0-9]{1,2})",
     "DD": r"(?P<d>[0-9]{1,2})",
@@ -387,6 +412,14 @@ DECIMAL_MARKS = {"point": ",", "comma": "."}
 MAX_HEADER_ROW = 1000
 
 
+def named_zone(name: str) -> ZoneInfo | None:
+    """The zone with this IANA name, or None when there is no such zone here."""
+    try:
+        return ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        return None
+
+
 def _century(short_year: int) -> int:
     return 1900 + short_year if short_year >= CENTURY_BREAK else 2000 + short_year
 
@@ -430,6 +463,13 @@ class FileSpec:
     encoding: str = "utf-8"
     # The physical line the header sits on; ad platforms print a title above it.
     header_row: int = 1
+    # The zone this file's timestamps are written in, and the zone dates are stated in.
+    time_zone: str = ""
+    reporting_time_zone: str = ""
+    # A second export that carries fields this one does not, matched on a shared key.
+    lookup_path: Path | None = None
+    lookup_match: tuple[str, str] = ("", "")
+    lookup_columns: dict[str, str] = field(default_factory=dict)
     filter_column: str = ""
     filter_values: tuple[str, ...] = ()
     # Amounts are written in this currency and converted at the declared rate.
@@ -495,12 +535,24 @@ class FileSpec:
         raise ValueError(f"{field} does not match the declared format {self.date_format}")
 
     def _calendar_date(self, moment: datetime, zone: str | None) -> date:
-        """The day this value belongs to, once its own offset and the declared shift are applied."""
+        """The day this value belongs to, once its offset, its zone and any shift are applied.
+
+        A value stating its own offset is an instant; a file declaring the zone its
+        timestamps are written in makes its values instants too. Either way the instant
+        is stated in the engagement's reporting zone before the day is taken, so a late
+        evening in Sao Paulo is not silently the next morning in the report.
+        """
         if zone:
-            if zone not in ("Z", "z"):
+            if zone in ("Z", "z"):
+                moment = moment.replace(tzinfo=timezone.utc)
+            else:
                 digits = zone.replace(":", "")
                 minutes = int(digits[1:3]) * 60 + int(digits[3:5])
-                moment -= timedelta(minutes=-minutes if zone[0] == "-" else minutes)
+                moment = moment.replace(tzinfo=timezone(timedelta(minutes=-minutes if zone[0] == "-" else minutes)))
+        elif self.time_zone:
+            moment = moment.replace(tzinfo=ZoneInfo(self.time_zone))
+        if moment.tzinfo is not None:
+            moment = moment.astimezone(ZoneInfo(self.reporting_time_zone or "UTC")).replace(tzinfo=None)
         return (moment + timedelta(hours=self.time_shift_hours)).date() if self.time_shift_hours else moment.date()
 
     def _decimal(self, text: str, field: str) -> Decimal:
@@ -565,6 +617,11 @@ class FileSpec:
         return Decimal("0.00") if value == 0 else value
 
     @property
+    def lookup_fields(self) -> tuple[str, ...]:
+        """Fields another export supplies, which this one therefore need not carry."""
+        return tuple(self.lookup_columns)
+
+    @property
     def amount_format(self) -> str:
         parts = [
             f"thousands separator '{self.thousands_separator}'" if self.thousands_separator else "no thousands separator"
@@ -605,6 +662,8 @@ class Engagement:
     revenue_join: str = "lead_id"
     multiple_campaigns: str = "unattributed"
     coverage_threshold: str | None = None
+    # The zone every date is stated in, once a file says which zone its timestamps are in.
+    reporting_time_zone: str = "UTC"
 
     @property
     def declared(self) -> bool:
@@ -630,11 +689,15 @@ class Engagement:
             "revenue_join": self.revenue_join,
             "multiple_campaigns": self.multiple_campaigns,
             "coverage_threshold_percent": self.threshold,
+            "reporting_time_zone": self.reporting_time_zone,
             "files": [
                 {
                     "source": spec.source,
                     "file": spec.label,
-                    "columns": dict(spec.columns),
+                    "columns": {
+                        name: header for name, header in spec.columns.items()
+                        if not header.startswith(LOOKUP_PREFIX)
+                    },
                     "fixed": dict(spec.fixed),
                     "date_formats": list(spec.date_formats),
                     "time_zone_shift_hours": spec.time_shift_hours,
@@ -648,6 +711,16 @@ class Engagement:
                     "thousands_separator": spec.thousands_separator,
                     "currency_label": spec.currency_label,
                     "decimal": spec.decimal,
+                    "time_zone": spec.time_zone,
+                    "lookup": (
+                        {
+                            "file": spec.lookup_path.name,
+                            "match": {spec.lookup_match[0]: spec.lookup_match[1]},
+                            "columns": dict(spec.lookup_columns),
+                        }
+                        if spec.lookup_path
+                        else None
+                    ),
                     "header_row": spec.header_row,
                     "currency": spec.currency,
                     "aed_per_unit": spec.aed_per_unit,
@@ -727,6 +800,9 @@ def load_engagement(config_path: str | Path) -> Engagement:
         not isinstance(threshold, str) or not PLAIN_DECIMAL.fullmatch(threshold) or not 0 <= Decimal(threshold) <= 100
     ):
         fail('coverage_threshold_percent must be a percentage in quotes, such as "70"')
+    reporting_zone = config.get("reporting_time_zone", "UTC")
+    if not is_text(reporting_zone) or named_zone(reporting_zone) is None:
+        fail('reporting_time_zone must be a zone name such as "Asia/Dubai" or "UTC"')
     aliases = config.get("channel_aliases", {})
     if not isinstance(aliases, dict) or not all(
         is_text(key) and is_text(value) and "[" not in value and "]" not in value for key, value in aliases.items()
@@ -788,13 +864,20 @@ def load_engagement(config_path: str | Path) -> Engagement:
             )
             if wrong:
                 fail(f"{where} cannot declare {', '.join(wrong)} for the {source} export with revenue_join {join}")
+            declaring = entry.get("lookup")
+            lookup_fields = (
+                tuple(declaring["columns"])
+                if isinstance(declaring, dict) and isinstance(declaring.get("columns"), dict)
+                else ()
+            )
             computed = (
                 set(AMOUNT_FIELDS[source])
                 if isinstance(entry.get("amounts"), dict) and entry["amounts"].get("value_from")
                 else set()
             )
             unclear = sorted(set(columns) & set(fixed)) + [
-                name for name in fields if name not in columns and name not in fixed and name not in computed
+                name for name in fields
+                if name not in columns and name not in fixed and name not in computed and name not in lookup_fields
             ]
             if unclear:
                 fail(f"{where} must give each field exactly one column or fixed value: {', '.join(unclear)}")
@@ -806,6 +889,32 @@ def load_engagement(config_path: str | Path) -> Engagement:
             encoding = entry.get("encoding", "utf-8")
             if encoding not in ENCODINGS:
                 fail(f"{where}.encoding must be one of {', '.join(ENCODINGS)}")
+            declared_lookup = entry.get("lookup")
+            lookup_path, lookup_match, lookup_columns = None, ("", ""), {}
+            if declared_lookup is not None:
+                match = declared_lookup.get("match") if isinstance(declared_lookup, dict) else None
+                taken = declared_lookup.get("columns") if isinstance(declared_lookup, dict) else None
+                if (
+                    not isinstance(declared_lookup, dict)
+                    or set(declared_lookup) != {"file", "match", "columns"}
+                    or not is_text(declared_lookup.get("file"))
+                    or any(mark in declared_lookup["file"] for mark in ":\\|`")
+                    or not isinstance(match, dict) or len(match) != 1
+                    or not all(is_header(key) and is_header(value) for key, value in match.items())
+                    or not isinstance(taken, dict) or not taken
+                    or not all(is_header(value) for value in taken.values())
+                    or set(taken) - set(fields)
+                ):
+                    fail(f'{where}.lookup must be {{"file": "deals.csv", "match": {{"their_key": "my_key"}}, '
+                         f'"columns": {{"{fields[0]}": "their_column"}}}} naming fields this export may declare')
+                lookup_path = (path.parent / declared_lookup["file"]).resolve()
+                if not lookup_path.is_file():
+                    fail(f"{where}.lookup.file {declared_lookup['file']} does not exist next to the config")
+                if set(taken) & (set(columns) | set(fixed)):
+                    fail(f"{where}.lookup cannot supply a field this export already declares: "
+                         f"{', '.join(sorted(set(taken) & (set(columns) | set(fixed))))}")
+                lookup_match = next(iter(match.items()))
+                lookup_columns = dict(taken)
             header_row = entry.get("header_row", 1)
             if not isinstance(header_row, int) or isinstance(header_row, bool) or not 1 <= header_row <= MAX_HEADER_ROW:
                 fail(f"{where}.header_row must be a whole number from 1 to {MAX_HEADER_ROW}: the line the column "
@@ -831,6 +940,13 @@ def load_engagement(config_path: str | Path) -> Engagement:
             shift = entry.get("time_zone_shift_hours", 0)
             if type(shift) is not int or not -MAX_TIME_SHIFT_HOURS <= shift <= MAX_TIME_SHIFT_HOURS:
                 fail(f"{where}.time_zone_shift_hours must be whole hours between -{MAX_TIME_SHIFT_HOURS} and {MAX_TIME_SHIFT_HOURS}")
+            zone_name = entry.get("time_zone", "")
+            if zone_name and (not is_text(zone_name) or named_zone(zone_name) is None):
+                fail(f'{where}.time_zone must be a zone name such as "America/Sao_Paulo"')
+            if zone_name and shift:
+                fail(f"{where} declares both time_zone and time_zone_shift_hours; declare one of them")
+            if zone_name and any("(?P<H>" not in compile_date_format(name).pattern for name in declared_dates):
+                fail(f"{where}.time_zone needs every declared date_format to include a time")
             if shift and any("(?P<H>" not in compile_date_format(name).pattern for name in declared_dates):
                 fail(f"{where}.time_zone_shift_hours needs every declared date_format to include a time")
             amounts = entry.get("amounts", {})
@@ -948,9 +1064,16 @@ def load_engagement(config_path: str | Path) -> Engagement:
                 fail(f"{where}.uppercase may list only {', '.join(identifiers)}")
             specs.append(
                 FileSpec(
-                    source=source, path=file_path, label=label, columns=dict(columns), fixed=dict(fixed),
+                    source=source, path=file_path, label=label,
+                    columns={
+                        **columns,
+                        **{name: LOOKUP_PREFIX + header for name, header in lookup_columns.items()},
+                    },
+                    fixed=dict(fixed),
                     date_formats=tuple(declared_dates), thousands_separator=separator, currency_label=currency_label,
                     decimal=decimal_mark, header_row=header_row,
+                    time_zone=zone_name, reporting_time_zone=reporting_zone,
+                    lookup_path=lookup_path, lookup_match=lookup_match, lookup_columns=dict(lookup_columns),
                     uppercase=frozenset(uppercase), fields=tuple(fields), delimiter=delimiter, encoding=encoding,
                     filter_column=filter_column, filter_values=filter_values, currency=code, aed_per_unit=rate,
                     rate_source=rate_source, refunds=refunds, value_from=parsed_value_from,
@@ -964,7 +1087,7 @@ def load_engagement(config_path: str | Path) -> Engagement:
         files[source] = tuple(specs)
     return Engagement(
         files, tuple(windows), folded, config["engagement"], config["data_origin"], path,
-        hashlib.sha256(raw).hexdigest(), join, rule, threshold,
+        hashlib.sha256(raw).hexdigest(), join, rule, threshold, reporting_zone,
     )
 
 
@@ -987,6 +1110,31 @@ def _found_columns(fieldnames: list[str]) -> str:
         return "none"
     shown = ", ".join(f"'{name}'" for name in fieldnames[:12])
     return shown + (f" and {len(fieldnames) - 12} more" if len(fieldnames) > 12 else "")
+
+
+LOOKUP_PREFIX = "\x00lookup:"
+
+
+def _fill_from_lookup(spec: FileSpec, rows: list[tuple[int, dict[str, Any]]]) -> None:
+    """Copy the declared columns of a second export onto every row that shares its key.
+
+    A row whose key is not in the second export keeps an empty value, so it is refused
+    and named by the same rules as a blank cell, never quietly filled.
+    """
+    their_key, my_key = spec.lookup_match
+    reader = replace(
+        spec, path=spec.lookup_path, columns={}, fixed={}, fields=(), lookup_path=None, lookup_columns={},
+        filter_column="", filter_values=(), currency_column="", value_from=None,
+    )
+    index: dict[str, dict[str, Any]] = {}
+    for _line, row in _read_csv(reader):
+        key = _text(row, their_key)
+        if key and key not in index:
+            index[key] = row
+    for _line, row in rows:
+        found = index.get(_text(row, my_key), {})
+        for field_name, header in spec.lookup_columns.items():
+            row[LOOKUP_PREFIX + header] = _text(found, header) if found else ""
 
 
 def _read_csv(spec: FileSpec) -> list[tuple[int, dict[str, Any]]]:
@@ -1025,8 +1173,14 @@ def _read_csv(spec: FileSpec) -> list[tuple[int, dict[str, Any]]]:
         ) from exc
     except csv.Error as exc:
         raise InputContractError(f"{spec.name} is not a readable CSV ({exc})") from exc
+    if spec.lookup_path is not None:
+        _fill_from_lookup(spec, rows)
     found = list(fieldnames or [])
-    needed = {name: spec.columns[name] for name in CANONICAL_FIELDS[spec.source] if name in spec.columns}
+    needed = {
+        name: spec.columns[name]
+        for name in CANONICAL_FIELDS[spec.source]
+        if name in spec.columns and not spec.columns[name].startswith(LOOKUP_PREFIX)
+    }
     missing = [name for name, header in needed.items() if header not in found]
     if missing and not spec.label:
         raise InputContractError(
@@ -1472,6 +1626,12 @@ class EvidenceEngine:
             for source in SOURCES
             for spec in engagement.files[source]
         }
+        fingerprints.update({
+            f"{source}/{spec.lookup_path.name}": _fingerprint(spec.lookup_path)
+            for source in SOURCES
+            for spec in engagement.files[source]
+            if spec.lookup_path is not None
+        })
         ruleset = json.loads(json.dumps(RULESET))
         ruleset["attribution_windows_days"] = list(engagement.windows)
         ruleset["coverage_threshold_percent"] = engagement.threshold
@@ -2251,6 +2411,8 @@ def _interpretations(report: EvidenceReport) -> str:
         if item["delimiter"] != "comma" or item["encoding"] != "utf-8":
             parts.append(f"{item['delimiter']}-separated {item['encoding']} text")
         parts.append("dates written " + " or ".join(item["date_formats"]))
+        if item.get("time_zone"):
+            parts.append(f"times written in {item['time_zone']}")
         if item.get("header_row", 1) > 1:
             parts.append(f"column names read from line {item['header_row']}")
         if item["time_zone_shift_hours"]:

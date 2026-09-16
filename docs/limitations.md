@@ -14,7 +14,7 @@
   closed deals and 112,650 real order lines joined through customers, with the
   advertising spend a declared overlay because that dataset publishes none.
 
-Verified with 153 tests on Python 3.13. CI runs the same suite on Python
+Verified with 155 tests on Python 3.13. CI runs the same suite on Python
 3.11–3.13 for every push.
 
 ## What it does not demonstrate
@@ -41,19 +41,29 @@ Verified with 153 tests on Python 3.13. CI runs the same suite on Python
   several date formats, compute an amount from two columns, convert a currency
   named per row at a declared rate, read European numbers such as `1.234,56`,
   carry a currency symbol beside the amount, and start its header below a report
-  title. It cannot invent a rate, read an undeclared format, or choose between two
-  readings of an ambiguous date: each is refused or left for a person to settle.
+  title. One file may also fill a field from a second export that shares a key,
+  through `lookup`, for systems that export a record across two files. It cannot
+  invent a rate, read an undeclared format, or choose between two readings of an
+  ambiguous date: each is refused or left for a person to settle.
 - Line-item exports are summed per invoice when `line_id` is declared. Lines of
   one invoice that disagree about the customer or date are all held back.
 - Invoice status is read only when an `include_when` filter declares which values
   to keep; otherwise every row in the export counts, including unpaid invoices.
-- A date is read in whatever shape the file declares, including month names and
-  two-digit years, and converted to the one calendar date every figure uses. Time
+- A date is read in whatever shape the file declares, including month names in
+  English, Arabic, French, German, Spanish, Portuguese, Italian and Dutch, and
+  two-digit years, and converted to the one calendar date every figure uses. A
+  shortened month name that two months share is dropped from the table and
+  refused rather than guessed. Time
   of day is otherwise ignored, unless the value carries its own UTC offset (`Z` or
   `+04:00`), or the file declares `time_zone_shift_hours`: then the instant is
-  moved into the day it belongs to. The tool reads many shapes but never decides
-  between two readings of one value; an ambiguous file is refused or settled by a
-  person.
+  moved into the day it belongs to. A file may instead name the zone its
+  timestamps are written in (`time_zone`, such as `America/Sao_Paulo`), and every
+  date is then stated in the engagement's `reporting_time_zone`, with summer time
+  taken from the system's IANA database rather than assumed. Both implementations
+  resolve zones independently, so a machine whose zone database disagrees makes
+  the checker disagree and nothing publishes. The tool reads many shapes but never
+  decides between two readings of one value; an ambiguous file is refused or
+  settled by a person.
 - A run reads only what the config declares; it detects nothing. Separators are
   `comma`, `semicolon` or `tab`, and encodings UTF-8, UTF-16, Windows-1252 or
   Latin-1. `propose` reads the exports beforehand and drafts those declarations

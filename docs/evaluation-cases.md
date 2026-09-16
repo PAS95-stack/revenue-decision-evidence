@@ -2,7 +2,7 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 153 tests, all passing on Python 3.13 on 16 September 2026, in about
+**Result:** 155 tests, all passing on Python 3.13 on 16 September 2026, in about
 three seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
@@ -177,3 +177,5 @@ minimum.
 | f33 | A value carrying its own UTC offset moves to the day it belongs to; a day-first and month-first pair is refused whatever separator it uses, while a year-first shape is never ambiguous |
 | f34 | One command creates the folder, records every export at intake, drafts the config and runs it, reproducing the worked example's figures |
 | f35 | The same command refuses to run when the draft still needs a person, and publishes nothing |
+| f36 | A file naming the zone its timestamps are written in has every date stated in the reporting zone, summer time included; an unknown zone, or a zone beside a shift, is refused |
+| f37 | A second export fills a field through a shared key, is fingerprinted into `run_id`, and a row whose key it does not carry is refused and named rather than filled |

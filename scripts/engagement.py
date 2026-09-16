@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from revenue_evidence import cli  # noqa: E402
 from revenue_evidence.engine import InputContractError, ensure_outside_repository, load_engagement  # noqa: E402
-from revenue_evidence.propose import unresolved, write_proposal  # noqa: E402
+from revenue_evidence.propose import advisory, unresolved, write_proposal  # noqa: E402
 from xlsx_to_csv import WorkbookError, convert  # noqa: E402
 
 CONFIG_NAME = "engagement.json"
@@ -200,6 +200,11 @@ def ingest(folder: Path, received_on: str, received_from: str, name: str | None,
         report = notes.read_text(encoding="utf-8")
         print(report)
         outstanding = unresolved(report)
+        worth_reading = advisory(report)
+        if worth_reading and not outstanding:
+            print(f"\n{len(worth_reading)} line(s) worth checking; each refuses and lists what it cannot read:")
+            for line in worth_reading:
+                print(f"  {line}")
         if outstanding:
             print(f"\n{len(outstanding)} choice(s) need you before this can run:")
             for line in outstanding:
@@ -254,11 +259,15 @@ def run(folder: Path, as_of: str | None, repository: Path) -> int:
     problems = []
     for specs in engagement.files.values():
         for spec in specs:
-            row = logged.get(spec.label)
-            if row is None:
-                problems.append(f"{spec.label} was not logged at intake")
-            elif _sha256(spec.path) != row["sha256"]:
-                problems.append(f"{spec.label} changed since intake")
+            wanted = [(spec.label, spec.path)]
+            if spec.lookup_path is not None:
+                wanted.append((spec.lookup_path.name, spec.lookup_path))
+            for label, file_path in wanted:
+                row = logged.get(label)
+                if row is None:
+                    problems.append(f"{label} was not logged at intake")
+                elif _sha256(file_path) != row["sha256"]:
+                    problems.append(f"{label} changed since intake")
     if problems:
         print("Refusing to run: " + "; ".join(problems) + ".", file=sys.stderr)
         return 2

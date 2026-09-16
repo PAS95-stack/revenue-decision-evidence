@@ -22,7 +22,7 @@ from revenue_evidence.engine import OUTPUT_NAMES, EvidenceEngine, write_outputs 
 
 RECONSTRUCT = ROOT / "src" / "revenue_evidence" / "reconstruct.py"
 DATA = ROOT / "data" / "synthetic"
-STDLIB_ALLOWED = {"__future__", "argparse", "collections", "csv", "hashlib", "io", "json", "re", "sys", "datetime", "decimal", "pathlib"}
+STDLIB_ALLOWED = {"__future__", "argparse", "collections", "csv", "hashlib", "io", "json", "re", "sys", "datetime", "decimal", "pathlib", "zoneinfo"}
 
 
 class ReconstructionTests(unittest.TestCase):

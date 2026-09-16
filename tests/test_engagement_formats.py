@@ -932,6 +932,85 @@ class WrittenDateTests(FormatTestCase):
         self.assertIsNotNone(load_engagement(config), "a year-first shape is never ambiguous")
 
 
+    def test_f36_a_named_zone_states_a_timestamp_in_the_reporting_day(self):
+        spec = engine.FileSpec("revenue", Path("x"), "x", {"date": "D"}, {}, date_formats=("YYYY-MM-DD HH:MM",),
+                               fields=("date",), time_zone="America/Sao_Paulo", reporting_time_zone="Asia/Dubai")
+        self.assertEqual(spec.read_date({"D": "2026-07-05 23:30"}, "date"), date(2026, 7, 6))
+        summer = engine.FileSpec("revenue", Path("x"), "x", {"date": "D"}, {}, date_formats=("YYYY-MM-DD HH:MM",),
+                                 fields=("date",), time_zone="Europe/Berlin", reporting_time_zone="UTC")
+        self.assertEqual(summer.read_date({"D": "2026-07-05 00:30"}, "date"), date(2026, 7, 4), "summer time counts")
+        self.assertEqual(summer.read_date({"D": "2026-01-05 00:30"}, "date"), date(2026, 1, 4), "winter time counts")
+
+        config = self.example()
+        invoices = config.parent / "xero_invoices.csv"
+        rows = list(csv.reader(io.StringIO(invoices.read_text(encoding="utf-8"))))
+        for row in rows[1:]:
+            row[2] = f"{row[2]} 23:30"
+        with invoices.open("w", encoding="utf-8", newline="") as handle:
+            csv.writer(handle).writerows(rows)
+        edit_json(config, lambda c: (
+            c.update(reporting_time_zone="Asia/Dubai"),
+            c["sources"]["revenue"][0].update(date_format="DD/MM/YYYY HH:MM", time_zone="America/Sao_Paulo"),
+        ))
+        report = self.publish(config)
+        self.assertEqual(report.summary["accepted_revenue_aed"], "29400.00")
+        self.assertIn("times written in America/Sao_Paulo",
+                      (self.root / "out" / "executive_brief.md").read_text(encoding="utf-8"))
+        edit_json(config, lambda c: c["sources"]["revenue"][0].update(time_zone="Mars/Olympus"))
+        with self.assertRaisesRegex(InputContractError, "time_zone must be a zone name"):
+            load_engagement(config)
+        edit_json(config, lambda c: c["sources"]["revenue"][0].update(time_zone="Asia/Dubai", time_zone_shift_hours=4))
+        with self.assertRaisesRegex(InputContractError, "declare one of them"):
+            load_engagement(config)
+
+
+    def test_f37_a_second_export_fills_a_field_through_a_shared_key(self):
+        folder = self.root / "inputs"
+        folder.mkdir()
+        write_csv(folder / "leads.csv", ["mql_id", "origin", "first_contact_date", "status"],
+                  [["L-1", "C-1", "2026-07-01", "won"], ["L-2", "C-1", "2026-07-01", "won"]])
+        write_csv(folder / "deals.csv", ["mql_id", "seller_id", "won_date"], [["L-1", "S-1", "2026-07-02"]])
+        write_csv(folder / "orders.csv", ["Order ID", "seller_id", "Sales", "Order Date"],
+                  [["T-1", "S-1", "500.00", "2026-07-10"]])
+        write_csv(folder / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", "C-1", "Search", "100.00"]])
+        config = folder / "engagement.json"
+        config.write_text(json.dumps({
+            "config_version": 1, "engagement": "Lookup", "data_origin": "synthetic", "revenue_join": "customer_id",
+            "sources": {
+                "ads": [{"file": "ads.csv", "columns": {"date": "Day", "campaign_id": "Campaign ID",
+                                                        "channel": "Campaign type", "spend_aed": "Cost"}}],
+                "crm": [{"file": "leads.csv",
+                         "columns": {"lead_id": "mql_id", "campaign_id": "origin",
+                                     "created_at": "first_contact_date", "status": "status"},
+                         "lookup": {"file": "deals.csv", "match": {"mql_id": "mql_id"},
+                                    "columns": {"customer_id": "seller_id"}}}],
+                "revenue": [{"file": "orders.csv",
+                             "columns": {"transaction_id": "Order ID", "customer_id": "seller_id",
+                                         "value_aed": "Sales", "date": "Order Date"}}],
+            },
+        }), encoding="utf-8")
+        report = self.publish(config)
+        self.assertEqual(report.summary["attributed_revenue_aed"], "500.00", "the looked-up customer joins revenue")
+        rows = {ref(row): row for row in report.dispositions}
+        self.assertEqual(rows["crm/leads.csv:2"].status, "accepted")
+        self.assertEqual(rows["crm/leads.csv:3"].status, "rejected", "a lead with no deal is refused, not filled")
+        self.assertIn("customer_id is required", rows["crm/leads.csv:3"].reason)
+        self.assertIn("crm/deals.csv", report.source_fingerprints, "the second export is part of the run identity")
+        declared = next(item for item in report.engagement["files"] if item["file"] == "leads.csv")
+        self.assertNotIn("customer_id", declared["columns"], "the internal name stays out of the report")
+        self.assertEqual(declared["lookup"]["columns"], {"customer_id": "seller_id"})
+        # Supplying a field the export already declares is a clash, not a second opinion.
+        edit_json(config, lambda c: c["sources"]["crm"][0]["lookup"].update(
+            columns={"customer_id": "seller_id", "campaign_id": "origin"}))
+        with self.assertRaisesRegex(InputContractError, "already declares"):
+            load_engagement(config)
+        edit_json(config, lambda c: c["sources"]["crm"][0]["lookup"].update(file="absent.csv",
+                                                                           columns={"customer_id": "seller_id"}))
+        with self.assertRaisesRegex(InputContractError, "does not exist next to the config"):
+            load_engagement(config)
+
+
 class OneCommandTests(FormatTestCase):
     """The whole journey in one command, so an engagement needs no assembly by hand."""
 
