@@ -24,10 +24,12 @@ or evidence of paid validation.
   from this evidence set alone.*
 - **Reads real exports through a declared engagement config.** Column names,
   separators and encodings (including semicolon-separated Windows-1252 files),
-  date and number formats, ad accounts in other currencies, refunds and credit
-  notes, revenue that names customers rather than leads, and attribution
-  windows are declared per engagement, never guessed. See
-  [`docs/engagements.md`](docs/engagements.md).
+  several date formats within one file, a total computed from quantity and unit
+  price, a currency named per row, time-zone shifts, ad accounts in other
+  currencies, refunds and credit notes, revenue that names customers rather than
+  leads, and attribution windows are declared per engagement, never guessed.
+  `propose` drafts the config from the exports themselves and marks what only a
+  person can decide. See [`docs/engagements.md`](docs/engagements.md).
 - **Publishes only what an independent check reproduces.**
   `src/revenue_evidence/reconstruct.py` re-derives every row status and figure
   from the raw CSVs without using the engine's code. If it disagrees, or an
@@ -92,6 +94,15 @@ python3 scripts/engagement.py init ~/engagements/client-2026-09 --name "Client, 
 
 ```bash
 python3 scripts/engagement.py intake ~/engagements/client-2026-09 --received-on 2026-09-16 --received-from "Finance"
+```
+
+The config is drafted from the exports, with the evidence for every choice and
+**needs you** beside anything the data cannot settle — an exchange rate, a
+channel with no column, a date that reads both ways. Check it, then rename the
+draft to `engagement.json`:
+
+```bash
+python3 scripts/engagement.py propose ~/engagements/client-2026-09
 ```
 
 ```bash

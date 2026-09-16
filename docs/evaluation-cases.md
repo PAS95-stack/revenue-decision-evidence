@@ -2,8 +2,8 @@
 
 Run with `python3 -m unittest discover -s tests -v`.
 
-**Result:** 138 tests, all passing on Python 3.13 on 16 September 2026, in about
-two seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
+**Result:** 144 tests, all passing on Python 3.13 on 16 September 2026, in about
+three seconds. CI runs the suite on Python 3.11, 3.12 and 3.13, regenerates the
 synthetic outputs and compares them byte for byte with the committed files, and
 runs the independent checker on them.
 
@@ -162,3 +162,9 @@ minimum.
 | f18 | An .xlsx sheet converts to a CSV whose lines are the sheet's rows, with date-formatted cells as dates and the workbook's SHA-256 recorded |
 | f19 | A converted workbook runs end to end and its row references are spreadsheet rows |
 | f20 | Semicolon-separated Windows-1252 exports are read when declared, with quoted newlines keeping later rows on their own line |
+| f21 | A file may declare several date formats, tried in order; two that would read one value as two different dates are refused |
+| f22 | A total computed from quantity × unit price behaves as any other amount, including refunds and line conflicts; a missing part names the column |
+| f23 | A currency named per row converts at its declared rate, a code with no rate is rejected, and the brief says which rates were used |
+| f24 | A declared time-zone shift moves a timestamp into the day it belongs to, and is refused unless the format carries a time |
+| f25 | A config drafted from the exports runs end to end and reproduces the worked example's figures |
+| f26 | The draft marks what only a person can decide: an exchange rate, a computed total, a channel with no column, an ambiguous date |

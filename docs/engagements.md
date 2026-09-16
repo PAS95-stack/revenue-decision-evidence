@@ -65,9 +65,23 @@ workbook stores it.
 
 ## 3. Complete `inputs/engagement.json`
 
-Open each export's header row and replace the placeholders. The worked example is
-`examples/messy-exports/engagement.json`, which reads Meta, Google Ads, HubSpot and
-Xero-shaped files.
+Draft it from the exports rather than transcribing headers by hand:
+
+```bash
+python3 scripts/engagement.py propose ~/engagements/acme-2026-09
+```
+
+This reads every CSV in `inputs/` and writes `engagement.proposed.json` beside a
+report saying how each choice was reached: which column matched, how many sampled
+values parsed under the format proposed, and how many identifiers overlap between
+files. Anything the data cannot settle — an exchange rate, a channel name, a date
+that reads both ways — is marked **needs you** rather than guessed. Check every
+line, then rename the draft to `engagement.json`.
+
+The draft is a starting point, not an authority: nothing in it changes how a run
+reads data, and a value that does not match its declaration is still rejected. The
+worked example is `examples/messy-exports/engagement.json`, which reads Meta,
+Google Ads, HubSpot and Xero-shaped files.
 
 ### Top level
 
@@ -92,10 +106,13 @@ Xero-shaped files.
 | `fixed` | no | A value for a whole file: `channel` for an ad export with no channel column, or `status` for a CRM export |
 | `delimiter` | no | `comma` (default), `semicolon` (Excel in many locales) or `tab` |
 | `encoding` | no | `utf-8` (default, byte-order mark allowed), `utf-16`, `windows-1252` or `latin-1` |
-| `date_format` | no | One of `YYYY-MM-DD` (default), `DD/MM/YYYY`, `MM/DD/YYYY`, each optionally followed by ` HH:MM` or ` HH:MM:SS`, or `YYYY-MM-DDTHH:MM:SS`. The time of day is ignored |
+| `date_format` | no | One of `YYYY-MM-DD` (default), `DD/MM/YYYY`, `MM/DD/YYYY`, each optionally followed by ` HH:MM` or ` HH:MM:SS`, or `YYYY-MM-DDTHH:MM:SS`. A list declares several for one file, tried in order: `["YYYY-MM-DD", "DD/MM/YYYY"]`. Two formats that would read one value as two different dates are refused, so an ambiguous export must be settled by a person |
+| `time_zone_shift_hours` | no | Whole hours from −14 to 14 added before the day is taken, for an export written in another time zone. Every declared `date_format` must carry a time |
 | `amounts.thousands_separator` | no | `","` or `""` |
 | `amounts.currency_label` | no | Text that may precede or follow the number, such as `AED` or `USD`; must equal the currency |
 | `amounts.currency` | no | `{"code": "USD", "aed_per_unit": "3.6725", "rate_source": "UAE dirham peg to the US dollar"}`. One fixed rate per file, rounded half-up to fils after conversion |
+| `amounts.currency` (per row) | no | When each row names its own currency: `{"column": "Currency", "rates": {"USD": "3.6725", "AED": "1"}, "rate_source": "where the rates come from"}`. A code with no declared rate is rejected and named, never converted at a guess |
+| `amounts.value_from` | no | Compute the amount where the export carries no total: `{"multiply": ["Quantity", "Unit price"]}` or `{"add": ["Net", "Tax"]}`. The computed field then takes no column of its own |
 | `amounts.refunds` | revenue only | `reject` (default), `negative_values` (`-500.00` or `(500.00)` is a refund) or `whole_file` (every row is a refund written as a positive amount) |
 | `uppercase` | no | Identifier fields to upper-case, when one system writes `meta-101` and another `META-101` |
 | `include_when` | no | Keep only rows whose column holds one of these values, compared without regard to letter case: `{"column": "Status", "values": ["PAID"]}`. Excluded rows get the status `filtered`, keep their amount, and are reported as a finding |

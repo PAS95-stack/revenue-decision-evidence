@@ -3,6 +3,7 @@
 
     python3 scripts/engagement.py init ~/engagements/acme-2026-09 --name "Acme clinics, September review"
     python3 scripts/engagement.py intake ~/engagements/acme-2026-09 --received-on 2026-09-16 --received-from "Finance manager"
+    python3 scripts/engagement.py propose ~/engagements/acme-2026-09
     python3 scripts/engagement.py run ~/engagements/acme-2026-09
     python3 scripts/engagement.py deletion-check ~/engagements/acme-2026-09
 
@@ -27,6 +28,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revenue_evidence import cli  # noqa: E402
 from revenue_evidence.engine import InputContractError, ensure_outside_repository, load_engagement  # noqa: E402
+from revenue_evidence.propose import write_proposal  # noqa: E402
 
 CONFIG_NAME = "engagement.json"
 INTAKE_FIELDS = ["file", "sha256", "bytes", "received_on", "received_from"]
@@ -116,7 +118,29 @@ def init(folder: Path, name: str, repository: Path) -> int:
             csv.writer(handle).writerow(fields)
     (folder / "records" / "deletion_record.md").write_text(DELETION_RECORD.format(name=name), encoding="utf-8")
     print(f"Created {folder}. Put the approved exports in inputs/, log them with intake, "
-          f"then replace the placeholders in inputs/{CONFIG_NAME} with the real column names.")
+          f"then run propose to draft inputs/{CONFIG_NAME} from the exports and check it.")
+    return 0
+
+
+def propose(folder: Path, name: str | None, data_origin: str) -> int:
+    """Draft a config from the exports themselves, with the evidence for every choice."""
+    inputs = folder / "inputs"
+    if not inputs.is_dir():
+        print(f"{inputs} does not exist; run init first", file=sys.stderr)
+        return 2
+    existing = inputs / CONFIG_NAME
+    if name is None and existing.exists():
+        try:
+            name = json.loads(existing.read_text(encoding="utf-8")).get("engagement")
+        except ValueError:
+            name = None
+    try:
+        draft, notes = write_proposal(inputs, name or folder.name, data_origin)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(notes.read_text(encoding="utf-8"))
+    print(f"Draft: {draft}\nCheck it, rename it to {CONFIG_NAME}, then run.")
     return 0
 
 
@@ -191,6 +215,10 @@ def main(argv: list[str] | None = None, repository: Path = ROOT) -> int:
     start = commands.add_parser("init", help="create an engagement folder outside the repository")
     start.add_argument("folder", type=Path)
     start.add_argument("--name", required=True, help="engagement name shown in the brief")
+    draft = commands.add_parser("propose", help="read the exports and draft a config, with the evidence for each choice")
+    draft.add_argument("folder", type=Path)
+    draft.add_argument("--name", help="engagement name; taken from an existing config, or the folder name")
+    draft.add_argument("--origin", default="client", choices=("client", "public", "synthetic"))
     log = commands.add_parser("intake", help="record the SHA-256 of every new export in inputs/")
     log.add_argument("folder", type=Path)
     log.add_argument("--received-on", required=True)
@@ -205,6 +233,8 @@ def main(argv: list[str] | None = None, repository: Path = ROOT) -> int:
     try:
         if args.command == "init":
             return init(folder, args.name, repository)
+        if args.command == "propose":
+            return propose(folder, args.name, args.origin)
         if args.command == "intake":
             return intake(folder, args.received_on, args.received_from)
         if args.command == "run":

@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
@@ -241,6 +241,9 @@ CURRENCY_CODE = re.compile(r"[A-Z]{3}")
 DELIMITERS = {"comma": ",", "semicolon": ";", "tab": "\t"}
 ENCODINGS = {"utf-8": "utf-8-sig", "utf-16": "utf-16", "windows-1252": "cp1252", "latin-1": "latin-1"}
 MAX_INTEGER_DIGITS = 15
+# A total an export writes in parts, such as a line quantity and its unit price.
+VALUE_OPERATIONS = ("multiply", "add")
+MAX_TIME_SHIFT_HOURS = 14
 # Only descriptive labels may be declared once for a whole file (a Meta export has no
 # channel column). Identifiers, dates and amounts must come from the rows themselves.
 FIXABLE_FIELDS = {"ads": ("channel",), "crm": ("status",), "revenue": ()}
@@ -252,7 +255,10 @@ CONFIG_KEYS = frozenset(
     }
 )
 FILE_KEYS = frozenset(
-    {"file", "columns", "fixed", "date_format", "amounts", "uppercase", "include_when", "delimiter", "encoding"}
+    {
+        "file", "columns", "fixed", "date_format", "amounts", "uppercase", "include_when", "delimiter", "encoding",
+        "time_zone_shift_hours",
+    }
 )
 MAX_FILES_PER_SOURCE = 20
 MAX_WINDOWS = 5
@@ -265,14 +271,18 @@ _DAY_PATTERNS = {
     "DD/MM/YYYY": r"(?P<d>[0-9]{1,2})/(?P<m>[0-9]{1,2})/(?P<y>[0-9]{4})",
     "MM/DD/YYYY": r"(?P<m>[0-9]{1,2})/(?P<d>[0-9]{1,2})/(?P<y>[0-9]{4})",
 }
-_TIME_PATTERNS = {"": "", " HH:MM": r" [0-9]{1,2}:[0-9]{2}", " HH:MM:SS": r" [0-9]{1,2}:[0-9]{2}:[0-9]{2}"}
+_TIME_PATTERNS = {
+    "": "",
+    " HH:MM": r" (?P<H>[0-9]{1,2}):(?P<M>[0-9]{2})",
+    " HH:MM:SS": r" (?P<H>[0-9]{1,2}):(?P<M>[0-9]{2}):[0-9]{2}",
+}
 DATE_FORMATS: dict[str, re.Pattern[str]] = {
     f"{day}{time}": re.compile(day_pattern + time_pattern)
     for day, day_pattern in _DAY_PATTERNS.items()
     for time, time_pattern in _TIME_PATTERNS.items()
 }
 DATE_FORMATS["YYYY-MM-DDTHH:MM:SS"] = re.compile(
-    _DAY_PATTERNS["YYYY-MM-DD"] + r"T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
+    _DAY_PATTERNS["YYYY-MM-DD"] + r"T(?P<H>[0-9]{2}):(?P<M>[0-9]{2}):[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
 )
 GROUPED_DECIMAL = re.compile(r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?")
 
@@ -295,7 +305,7 @@ class FileSpec:
     label: str
     columns: dict[str, str]
     fixed: dict[str, str]
-    date_format: str = "YYYY-MM-DD"
+    date_formats: tuple[str, ...] = ("YYYY-MM-DD",)
     thousands_separator: str = ""
     currency_label: str = ""
     uppercase: frozenset[str] = frozenset()
@@ -310,6 +320,22 @@ class FileSpec:
     aed_per_unit: str = "1"
     rate_source: str = ""
     refunds: str = "reject"
+    # A value the export writes in parts: ("multiply", ("Quantity", "Unit price")).
+    value_from: tuple[str, tuple[str, str]] | None = None
+    # A currency written per row, with a declared rate for each code.
+    currency_column: str = ""
+    currency_rates: dict[str, str] = field(default_factory=dict)
+    time_shift_hours: int = 0
+
+    @property
+    def date_format(self) -> str:
+        return " or ".join(self.date_formats)
+
+    @property
+    def extra_headers(self) -> tuple[str, ...]:
+        """Columns the file must also carry: a filter, a currency, or the parts of a value."""
+        extra = [self.filter_column, self.currency_column, *(self.value_from[1] if self.value_from else ())]
+        return tuple(header for header in extra if header)
 
     @property
     def name(self) -> str:
@@ -332,18 +358,23 @@ class FileSpec:
     def read_date(self, row: dict[str, Any], field: str) -> date:
         if not self.label:
             return _parse_date(row.get(self.columns[field]), field)
-        match = DATE_FORMATS[self.date_format].fullmatch(self.read_text(row, field))
-        try:
-            if match is None:
-                raise ValueError(field)
-            return date(int(match["y"]), int(match["m"]), int(match["d"]))
-        except ValueError as exc:
-            raise ValueError(f"{field} does not match the declared format {self.date_format}") from exc
-
-    def read_amount(self, row: dict[str, Any], field: str) -> Decimal:
-        if not self.label:
-            return _parse_money(row.get(self.columns[field]), field)
         text = self.read_text(row, field)
+        for name in self.date_formats:
+            match = DATE_FORMATS[name].fullmatch(text)
+            if match is None:
+                continue
+            try:
+                moment = datetime(
+                    int(match["y"]), int(match["m"]), int(match["d"]),
+                    int(match.groupdict().get("H") or 0), int(match.groupdict().get("M") or 0),
+                )
+            except ValueError:
+                break
+            return (moment + timedelta(hours=self.time_shift_hours)).date() if self.time_shift_hours else moment.date()
+        raise ValueError(f"{field} does not match the declared format {self.date_format}")
+
+    def _decimal(self, text: str, field: str) -> Decimal:
+        """One written amount, honouring the declared label, separator and sign."""
         if self.currency_label:
             if text.startswith(self.currency_label):
                 text = text[len(self.currency_label):].lstrip()
@@ -354,22 +385,48 @@ class FileSpec:
             text, negative = text[1:-1].strip(), True
         elif text.startswith("-"):
             text, negative = text[1:].lstrip(), True
-        problem = f"{field} is not an amount in the declared format ({self.amount_format})"
-        if negative and self.refunds != "negative_values":
-            raise ValueError(problem)
         if self.thousands_separator:
             if not GROUPED_DECIMAL.fullmatch(text):
-                raise ValueError(problem)
+                raise ValueError(f"{field} is not written in the declared format")
             text = text.replace(self.thousands_separator, "")
         if not PLAIN_DECIMAL.fullmatch(text):
-            raise ValueError(problem)
+            raise ValueError(f"{field} is not written in the declared format")
         if len(text.split(".")[0]) > MAX_INTEGER_DIGITS:
             raise ValueError(f"{field} is too large to represent exactly")
+        value = Decimal(text)
+        return -value if negative else value
+
+    def _rate(self, row: dict[str, Any], field: str) -> Decimal:
+        if not self.currency_column:
+            return Decimal(self.aed_per_unit)
+        code = _text(row, self.currency_column).upper()
+        rate = self.currency_rates.get(code)
+        if rate is None:
+            raise ValueError(f"{field} is in {code or 'an unnamed'} currency, which the config declares no rate for")
+        return Decimal(rate)
+
+    def read_amount(self, row: dict[str, Any], field: str) -> Decimal:
+        if not self.label:
+            return _parse_money(row.get(self.columns[field]), field)
+        problem = f"{field} is not an amount in the declared format ({self.amount_format})"
+        try:
+            if self.value_from:
+                operation, columns = self.value_from
+                first, second = (self._decimal(_text(row, column), field) for column in columns)
+                raw = first * second if operation == "multiply" else first + second
+            else:
+                raw = self._decimal(self.read_text(row, field), field)
+        except ValueError as exc:
+            if "too large" in str(exc):
+                raise
+            raise ValueError(problem) from exc
+        if raw < 0 and self.refunds != "negative_values":
+            raise ValueError(problem)
+        if self.refunds == "whole_file":
+            raw = -raw
         # Convert the amount as written, then round once to fils.
-        value = (Decimal(text) * Decimal(self.aed_per_unit)).quantize(MONEY, rounding=ROUND_HALF_UP)
-        if value == 0:
-            return Decimal("0.00")
-        return -value if negative or self.refunds == "whole_file" else value
+        value = (raw * self._rate(row, field)).quantize(MONEY, rounding=ROUND_HALF_UP)
+        return Decimal("0.00") if value == 0 else value
 
     @property
     def amount_format(self) -> str:
@@ -378,7 +435,12 @@ class FileSpec:
         ]
         if self.currency_label:
             parts.append(f"currency label {self.currency_label}")
-        if self.currency != "AED":
+        if self.value_from:
+            parts.append(f"value {self.value_from[0]} of {' and '.join(self.value_from[1])}")
+        if self.currency_column:
+            rates = ", ".join(f"{code} at {rate}" for code, rate in sorted(self.currency_rates.items()))
+            parts.append(f"currency from '{self.currency_column}' ({rates} AED per unit)")
+        elif self.currency != "AED":
             parts.append(f"{self.currency} converted at {self.aed_per_unit} AED per unit")
         parts.append(
             {
@@ -436,7 +498,13 @@ class Engagement:
                     "file": spec.label,
                     "columns": dict(spec.columns),
                     "fixed": dict(spec.fixed),
-                    "date_format": spec.date_format,
+                    "date_formats": list(spec.date_formats),
+                    "time_zone_shift_hours": spec.time_shift_hours,
+                    "value_from": (
+                        {"operation": spec.value_from[0], "columns": list(spec.value_from[1])} if spec.value_from else None
+                    ),
+                    "currency_column": spec.currency_column,
+                    "currency_rates": dict(sorted(spec.currency_rates.items())),
                     "delimiter": spec.delimiter,
                     "encoding": spec.encoding,
                     "thousands_separator": spec.thousands_separator,
@@ -580,8 +648,13 @@ def load_engagement(config_path: str | Path) -> Engagement:
             )
             if wrong:
                 fail(f"{where} cannot declare {', '.join(wrong)} for the {source} export with revenue_join {join}")
+            computed = (
+                set(AMOUNT_FIELDS[source])
+                if isinstance(entry.get("amounts"), dict) and entry["amounts"].get("value_from")
+                else set()
+            )
             unclear = sorted(set(columns) & set(fixed)) + [
-                name for name in fields if name not in columns and name not in fixed
+                name for name in fields if name not in columns and name not in fixed and name not in computed
             ]
             if unclear:
                 fail(f"{where} must give each field exactly one column or fixed value: {', '.join(unclear)}")
@@ -593,28 +666,61 @@ def load_engagement(config_path: str | Path) -> Engagement:
             encoding = entry.get("encoding", "utf-8")
             if encoding not in ENCODINGS:
                 fail(f"{where}.encoding must be one of {', '.join(ENCODINGS)}")
-            date_format = entry.get("date_format", "YYYY-MM-DD")
-            if date_format not in DATE_FORMATS:
-                fail(f"{where}.date_format must be one of {', '.join(DATE_FORMATS)}")
+            declared_dates = entry.get("date_format", "YYYY-MM-DD")
+            declared_dates = [declared_dates] if isinstance(declared_dates, str) else declared_dates
+            if (
+                not isinstance(declared_dates, list)
+                or not 1 <= len(declared_dates) <= 4
+                or len(set(declared_dates)) != len(declared_dates)
+                or any(not isinstance(name, str) or name not in DATE_FORMATS for name in declared_dates)
+            ):
+                fail(f"{where}.date_format must be one of {', '.join(DATE_FORMATS)}, or a list of them")
+            if {"DD/MM/YYYY", "MM/DD/YYYY"} <= {name.split(" ")[0].split("T")[0] for name in declared_dates}:
+                fail(f"{where}.date_format cannot declare both DD/MM/YYYY and MM/DD/YYYY: 03/07/2026 would be two dates")
+            shift = entry.get("time_zone_shift_hours", 0)
+            if type(shift) is not int or not -MAX_TIME_SHIFT_HOURS <= shift <= MAX_TIME_SHIFT_HOURS:
+                fail(f"{where}.time_zone_shift_hours must be whole hours between -{MAX_TIME_SHIFT_HOURS} and {MAX_TIME_SHIFT_HOURS}")
+            if shift and any("(?P<H>" not in DATE_FORMATS[name].pattern for name in declared_dates):
+                fail(f"{where}.time_zone_shift_hours needs every declared date_format to include a time")
             amounts = entry.get("amounts", {})
-            if not isinstance(amounts, dict) or set(amounts) - {"thousands_separator", "currency_label", "currency", "refunds"}:
-                fail(f"{where}.amounts may declare only thousands_separator, currency_label, currency and refunds")
+            if not isinstance(amounts, dict) or set(amounts) - {
+                "thousands_separator", "currency_label", "currency", "refunds", "value_from"
+            }:
+                fail(f"{where}.amounts may declare only thousands_separator, currency_label, currency, refunds and value_from")
             if amounts and not AMOUNT_FIELDS[source]:
                 fail(f"{where}.amounts is not allowed: the {source} export has no amounts")
             separator = amounts.get("thousands_separator", "")
             if separator not in ("", ","):
                 fail(f"{where}.amounts.thousands_separator must be ','")
+            declared_value = amounts.get("value_from")
+            parsed_value_from = None
+            if declared_value is not None:
+                named = list(declared_value.values())[0] if isinstance(declared_value, dict) and len(declared_value) == 1 else None
+                if (
+                    not isinstance(declared_value, dict)
+                    or set(declared_value) - set(VALUE_OPERATIONS)
+                    or not isinstance(named, list)
+                    or len(named) != 2
+                    or not all(is_header(column) for column in named)
+                ):
+                    fail(f'{where}.amounts.value_from must be {{"multiply": ["Quantity", "Unit price"]}} or {{"add": [...]}}')
+                parsed_value_from = (next(iter(declared_value)), tuple(named))
             currency = amounts.get("currency", {})
-            if not isinstance(currency, dict) or set(currency) - {"code", "aed_per_unit", "rate_source"}:
-                fail(f"{where}.amounts.currency may declare only code, aed_per_unit and rate_source")
+            if not isinstance(currency, dict) or set(currency) - {"code", "aed_per_unit", "rate_source", "column", "rates"}:
+                fail(f"{where}.amounts.currency may declare only code, aed_per_unit, rate_source, column and rates")
             code = currency.get("code", "AED")
             rate = currency.get("aed_per_unit", "1")
             rate_source = currency.get("rate_source", "")
-            if not isinstance(code, str) or not CURRENCY_CODE.fullmatch(code):
+            currency_column = currency.get("column", "")
+            declared_rates = currency.get("rates", {})
+            rates: dict[str, str] = {}
+            # A currency written per row declares a rate for each code, so the single-code rules do not apply.
+            per_row = bool(currency_column or declared_rates)
+            if not per_row and (not isinstance(code, str) or not CURRENCY_CODE.fullmatch(code)):
                 fail(f"{where}.amounts.currency.code must be a three-letter code such as USD")
-            if code == "AED" and (rate != "1" or rate_source):
+            if not per_row and code == "AED" and (rate != "1" or rate_source):
                 fail(f"{where}.amounts.currency: AED amounts take no conversion rate")
-            if code != "AED" and (
+            if not per_row and code != "AED" and (
                 not isinstance(rate, str)
                 or not PLAIN_DECIMAL.fullmatch(rate)
                 or Decimal(rate) <= 0
@@ -626,7 +732,29 @@ def load_engagement(config_path: str | Path) -> Engagement:
                     f"{where}.amounts.currency needs aed_per_unit as a positive decimal in quotes, such as \"3.6725\", "
                     "and a rate_source saying where the rate comes from"
                 )
+            if per_row:
+                if "code" in currency or "aed_per_unit" in currency:
+                    fail(f"{where}.amounts.currency declares either one code with its rate, or a column with rates")
+                if (
+                    not is_header(currency_column)
+                    or not isinstance(declared_rates, dict)
+                    or not declared_rates
+                    or not all(
+                        isinstance(name, str) and CURRENCY_CODE.fullmatch(name) and isinstance(value, str)
+                        and PLAIN_DECIMAL.fullmatch(value) and Decimal(value) > 0 and len(value.split(".")[0]) <= 6
+                        for name, value in declared_rates.items()
+                    )
+                    or not is_text(rate_source)
+                    or len(rate_source) > 200
+                ):
+                    fail(
+                        f'{where}.amounts.currency needs {{"column": "Currency", "rates": {{"USD": "3.6725"}}, '
+                        '"rate_source": "where the rates come from"}'
+                    )
+                rates, code, rate = dict(declared_rates), "AED", "1"
             currency_label = amounts.get("currency_label", "")
+            if currency_column and currency_label:
+                fail(f"{where}.amounts.currency_label cannot be used with a currency column")
             if currency_label not in ("", code):
                 fail(f"{where}.amounts.currency_label must be {code}, the declared currency")
             refunds = amounts.get("refunds", "reject")
@@ -658,8 +786,12 @@ def load_engagement(config_path: str | Path) -> Engagement:
                 fail(f"{where}.uppercase may list only {', '.join(identifiers)}")
             specs.append(
                 FileSpec(
-                    source, file_path, label, dict(columns), dict(fixed), date_format, separator, currency_label,
-                    frozenset(uppercase), tuple(fields), delimiter, encoding, filter_column, filter_values, code, rate, rate_source, refunds,
+                    source=source, path=file_path, label=label, columns=dict(columns), fixed=dict(fixed),
+                    date_formats=tuple(declared_dates), thousands_separator=separator, currency_label=currency_label,
+                    uppercase=frozenset(uppercase), fields=tuple(fields), delimiter=delimiter, encoding=encoding,
+                    filter_column=filter_column, filter_values=filter_values, currency=code, aed_per_unit=rate,
+                    rate_source=rate_source, refunds=refunds, value_from=parsed_value_from,
+                    currency_column=currency_column, currency_rates=rates, time_shift_hours=shift,
                 )
             )
         for optional in OPTIONAL_FIELDS[source]:
@@ -745,6 +877,12 @@ def _read_csv(spec: FileSpec) -> list[tuple[int, dict[str, Any]]]:
     repeated = sorted({header for header in needed.values() if found.count(header) > 1})
     if repeated:
         raise InputContractError(f"{spec.name} has more than one column named {', '.join(repeated)}")
+    absent = [header for header in spec.extra_headers if header not in found]
+    if absent:
+        raise InputContractError(
+            f"{spec.name} is missing the declared column {', '.join(repr(header) for header in absent)}. "
+            f"Found columns: {_found_columns(found)}."
+        )
     return rows
 
 
@@ -1669,8 +1807,9 @@ def diagnose(engagement: Engagement, report: EvidenceReport, sample: int = 500) 
         matches = {
             fmt: sum(1 for value in values if pattern.fullmatch(value)) for fmt, pattern in DATE_FORMATS.items()
         }
-        best = max(matches, key=lambda fmt: (matches[fmt], fmt == spec.date_format))
-        if matches[best] > matches.get(spec.date_format, 0):
+        declared_best = max((matches[fmt] for fmt in spec.date_formats), default=0)
+        best = max(matches, key=lambda fmt: (matches[fmt], fmt in spec.date_formats))
+        if matches[best] > declared_best:
             hints.append(
                 f"{name}: {matches[best]} of {total} rejected rows would match date_format \"{best}\" "
                 f"(declared \"{spec.date_format}\")."
@@ -1941,13 +2080,25 @@ def _interpretations(report: EvidenceReport) -> str:
             parts.append(", ".join(f"{name} fixed as {value}" for name, value in item["fixed"].items()))
         if item["delimiter"] != "comma" or item["encoding"] != "utf-8":
             parts.append(f"{item['delimiter']}-separated {item['encoding']} text")
-        parts.append(f"dates written {item['date_format']}")
+        parts.append("dates written " + " or ".join(item["date_formats"]))
+        if item["time_zone_shift_hours"]:
+            parts.append(f"times shifted {item['time_zone_shift_hours']:+d} hours before the date is taken")
         if item["source"] != "crm":
             amount = [
                 f"thousands separator '{item['thousands_separator']}'" if item["thousands_separator"] else "no thousands separator"
             ]
             if item["currency_label"]:
                 amount.append(f"currency label {item['currency_label']}")
+            if item["value_from"]:
+                amount.append(
+                    f"value {item['value_from']['operation']} of " + " and ".join(item["value_from"]["columns"])
+                )
+            if item["currency_column"]:
+                amount.append(
+                    f"currency from '{item['currency_column']}' ("
+                    + ", ".join(f"{code} at {rate}" for code, rate in item["currency_rates"].items())
+                    + " AED per unit)"
+                )
             if item["currency"] != "AED":
                 amount.append(f"{item['currency']} converted at {item['aed_per_unit']} AED per unit ({item['rate_source']})")
             if item["refunds"] == "negative_values":

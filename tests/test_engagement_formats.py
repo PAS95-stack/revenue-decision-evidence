@@ -605,6 +605,159 @@ class SpreadsheetAndSeparatorTests(FormatTestCase):
                       (self.root / "out" / "executive_brief.md").read_text(encoding="utf-8"))
 
 
+class DeclaredFormatTests(FormatTestCase):
+    """The last shapes real exports arrive in: mixed date styles, totals in parts, per-row currency, offsets."""
+
+    def build(self, folder_name: str, revenue_rows: list[list[str]], revenue_columns: dict, extra: dict | None = None) -> Path:
+        folder = self.root / folder_name
+        folder.mkdir()
+        write_csv(folder / "ads.csv", ["date", "campaign_id", "channel", "spend_aed"],
+                  [["2026-07-01", "C-1", "Paid Search", "1000"]])
+        write_csv(folder / "crm.csv", ["lead_id", "campaign_id", "created_at", "status"],
+                  [["L1", "C-1", "2026-07-01", "won"]])
+        write_csv(folder / "revenue.csv", list(revenue_rows[0]), revenue_rows[1:])
+        revenue = {"file": "revenue.csv", "columns": revenue_columns, **(extra or {})}
+        config = {
+            "config_version": 1, "engagement": folder_name, "data_origin": "synthetic",
+            "sources": {
+                "ads": [{"file": "ads.csv", "columns": {name: name for name in ("date", "campaign_id", "channel", "spend_aed")}}],
+                "crm": [{"file": "crm.csv", "columns": {name: name for name in ("lead_id", "campaign_id", "created_at", "status")}}],
+                "revenue": [revenue],
+            },
+        }
+        (folder / "engagement.json").write_text(json.dumps(config), encoding="utf-8")
+        return folder / "engagement.json"
+
+    def test_f21_a_file_may_declare_more_than_one_date_format(self):
+        config = self.build(
+            "mixed-dates",
+            [["Invoice", "Lead", "Amount", "Date"],
+             ["T1", "L1", "100", "2026-07-05"],
+             ["T2", "L1", "200", "06/07/2026"],
+             ["T3", "L1", "300", "07-07-2026"]],
+            {"transaction_id": "Invoice", "lead_id": "Lead", "value_aed": "Amount", "date": "Date"},
+            {"date_format": ["YYYY-MM-DD", "DD/MM/YYYY"]},
+        )
+        report = self.publish(config)
+        rows = {ref(row): row for row in report.dispositions}
+        self.assertEqual(rows["revenue/revenue.csv:2"].status, "accepted")
+        self.assertEqual(rows["revenue/revenue.csv:3"].status, "accepted")
+        self.assertEqual(rows["revenue/revenue.csv:4"].status, "rejected", "a third style is still not declared")
+        edit_json(config, lambda c: c["sources"]["revenue"][0].update(date_format=["DD/MM/YYYY", "MM/DD/YYYY"]))
+        with self.assertRaisesRegex(InputContractError, "would be two dates"):
+            load_engagement(config)
+
+    def test_f22_a_total_can_be_computed_from_quantity_and_unit_price(self):
+        config = self.build(
+            "computed",
+            [["Invoice", "Line", "Lead", "Quantity", "Unit price", "Date"],
+             ["T1", "1", "L1", "3", "10.50", "2026-07-05"],
+             ["T1", "2", "L1", "-1", "10.50", "2026-07-06"],
+             ["T2", "1", "L1", "2", "5", "2026-07-07"]],
+            {"transaction_id": "Invoice", "line_id": "Line", "lead_id": "Lead", "date": "Date"},
+            {"amounts": {"value_from": {"multiply": ["Quantity", "Unit price"]}, "refunds": "negative_values"}},
+        )
+        report = self.publish(config)
+        rows = {ref(row): row for row in report.dispositions}
+        self.assertEqual(rows["revenue/revenue.csv:2"].amount_aed, "31.50")
+        self.assertEqual(rows["revenue/revenue.csv:3"].status, "conflict", "lines of one invoice must share a date")
+        self.assertEqual(rows["revenue/revenue.csv:4"].amount_aed, "10.00")
+        self.assertEqual(report.summary["accepted_revenue_aed"], "10.00")
+        edit_json(config, lambda c: c["sources"]["revenue"][0]["amounts"].update(value_from={"multiply": ["Quantity", "Missing"]}))
+        with self.assertRaisesRegex(InputContractError, "missing the declared column 'Missing'"):
+            EvidenceEngine().run_engagement(load_engagement(config))
+
+    def test_f23_a_currency_column_uses_the_declared_rate_for_each_code(self):
+        config = self.build(
+            "currencies",
+            [["Invoice", "Lead", "Amount", "Currency", "Date"],
+             ["T1", "L1", "100", "USD", "2026-07-05"],
+             ["T2", "L1", "100", "AED", "2026-07-06"],
+             ["T3", "L1", "100", "INR", "2026-07-07"]],
+            {"transaction_id": "Invoice", "lead_id": "Lead", "value_aed": "Amount", "date": "Date"},
+            {"amounts": {"currency": {"column": "Currency", "rates": {"USD": "3.6725", "AED": "1"},
+                                      "rate_source": "UAE dirham peg to the US dollar"}}},
+        )
+        report = self.publish(config)
+        rows = {ref(row): row for row in report.dispositions}
+        self.assertEqual(rows["revenue/revenue.csv:2"].amount_aed, "367.25")
+        self.assertEqual(rows["revenue/revenue.csv:3"].amount_aed, "100.00")
+        self.assertEqual(rows["revenue/revenue.csv:4"].status, "rejected")
+        self.assertIn("INR currency, which the config declares no rate for", rows["revenue/revenue.csv:4"].reason)
+        self.assertIn("currency from 'Currency'", (self.root / "out" / "executive_brief.md").read_text(encoding="utf-8"))
+
+    def test_f24_a_declared_time_shift_moves_the_date_it_belongs_to(self):
+        config = self.build(
+            "timezone",
+            [["Invoice", "Lead", "Amount", "Date"],
+             ["T1", "L1", "100", "2026-07-05 23:30"],
+             ["T2", "L1", "200", "2026-07-06 10:00"]],
+            {"transaction_id": "Invoice", "lead_id": "Lead", "value_aed": "Amount", "date": "Date"},
+            {"date_format": "YYYY-MM-DD HH:MM", "time_zone_shift_hours": 4},
+        )
+        report = self.publish(config)
+        claims = {claim.evidence_id: claim.value for claim in report.claims}
+        self.assertEqual(claims["EV-REV-001"], "300.00")
+        self.assertEqual(claims["EV-WINATTR-030"], "300.00")
+        brief = (self.root / "out" / "executive_brief.md").read_text(encoding="utf-8")
+        self.assertIn("times shifted +4 hours", brief)
+        edit_json(config, lambda c: c["sources"]["revenue"][0].update(date_format="YYYY-MM-DD"))
+        with self.assertRaisesRegex(InputContractError, "needs every declared date_format to include a time"):
+            load_engagement(config)
+
+
+class ProposeTests(FormatTestCase):
+    """A person should check a draft config, not write one from scratch."""
+
+    def test_f25_the_draft_reads_the_exports_and_runs(self):
+        from revenue_evidence.propose import write_proposal
+
+        folder = self.root / "inputs"
+        folder.mkdir()
+        for path in EXAMPLE.glob("*.csv"):
+            shutil.copy(path, folder / path.name)
+        draft, notes = write_proposal(folder, "Proposed example", "synthetic")
+        report_text = notes.read_text(encoding="utf-8")
+        proposal = json.loads(draft.read_text(encoding="utf-8"))
+
+        files = {entry["file"]: (source, entry) for source, entries in proposal["sources"].items() for entry in entries}
+        self.assertEqual(files["meta_ads.csv"][0], "ads")
+        self.assertEqual(files["hubspot_contacts.csv"][0], "crm")
+        self.assertEqual(files["xero_invoices.csv"][0], "revenue")
+        self.assertEqual(files["meta_ads.csv"][1]["date_format"], "DD/MM/YYYY")
+        self.assertEqual(files["meta_ads.csv"][1]["columns"]["spend_aed"], "Amount spent (AED)")
+        self.assertEqual(files["hubspot_contacts.csv"][1]["columns"]["lead_id"], "Record ID")
+        self.assertIn("reads 100% of sampled values", report_text)
+
+        (folder / "engagement.json").write_text(json.dumps(proposal), encoding="utf-8")
+        engagement = load_engagement(folder / "engagement.json")
+        report = EvidenceEngine().run_engagement(engagement)
+        evaluation = write_outputs(report, self.root / "out")
+        self.assertEqual(evaluation["status"], "PASS", evaluation["failures"])
+        self.assertEqual(report.summary["accepted_spend_aed"], "13550.50")
+
+    def test_f26_the_draft_says_where_a_person_must_decide(self):
+        from revenue_evidence.propose import write_proposal
+
+        folder = self.root / "inputs"
+        folder.mkdir()
+        write_csv(folder / "orders.csv", ["Invoice", "Reference", "Quantity", "Unit price", "Currency", "Date"],
+                  [["T1", "L1", "2", "10.00", "USD", "2026-07-05"]])
+        write_csv(folder / "contacts.csv", ["Record ID", "Create Date", "Lifecycle Stage", "UTM Campaign"],
+                  [["L1", "2026-07-01", "customer", "C-1"]])
+        write_csv(folder / "ads.csv", ["Day", "Campaign ID", "Campaign type", "Cost"],
+                  [["2026-07-01", "C-1", "Search", "100"]])
+        draft, notes = write_proposal(folder, "Needs decisions", "client")
+        proposal = json.loads(draft.read_text(encoding="utf-8"))
+        revenue = proposal["sources"]["revenue"][0]
+        self.assertEqual(revenue["amounts"]["value_from"], {"multiply": ["Quantity", "Unit price"]})
+        self.assertEqual(revenue["amounts"]["currency"]["column"], "Currency")
+        self.assertIn("needs you", notes.read_text(encoding="utf-8"))
+        (folder / "engagement.json").write_text(json.dumps(proposal), encoding="utf-8")
+        with self.assertRaises(InputContractError):
+            load_engagement(folder / "engagement.json")
+
+
 class ReportSizeTests(FormatTestCase):
     """report.json repeats the CSVs; on a large export that repetition makes it unopenable."""
 

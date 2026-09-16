@@ -34,8 +34,11 @@ Verified with 138 tests on Python 3.13. CI runs the same suite on Python
   `row_dispositions.csv`.
 - Spend and revenue periods are not aligned: channel ROAS divides all attributed
   revenue in the files by all accepted spend.
-- An engagement config maps columns and declares formats. It cannot compute a
-  column (quantity × price), or mix date formats or currencies within one file.
+- An engagement config maps columns and declares formats. One file may declare
+  several date formats, compute an amount from two columns, and convert a
+  currency named per row at a declared rate. It cannot invent a rate, read an
+  undeclared format, or choose between two readings of an ambiguous date: each is
+  refused or left for a person to settle.
 - Line-item exports are summed per invoice when `line_id` is declared. Lines of
   one invoice that disagree about the customer or date are all held back.
 - Invoice status is read only when an `include_when` filter declares which values
